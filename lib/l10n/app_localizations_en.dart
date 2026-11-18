@@ -3108,6 +3108,23 @@ class AppLocalizationsEn extends AppLocalizations {
       'Not counting subagents, compaction or the CLI\'s side requests';
 
   @override
+  String get codexAccountLimits => 'Codex account limits';
+
+  @override
+  String get codexAccountSignIn =>
+      'Sign in with the local Codex CLI to see ChatGPT limits.';
+
+  @override
+  String get codexAccountApiKey =>
+      'API key · ChatGPT plan limits do not apply.';
+
+  @override
+  String get codexAccountChatGpt => 'ChatGPT';
+
+  @override
+  String get codexAccountWindow => 'Limit window';
+
+  @override
   String get usagePlanUsage => 'Plan usage';
 
   @override

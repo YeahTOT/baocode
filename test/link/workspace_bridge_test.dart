@@ -12,6 +12,7 @@ import 'package:baocode/bots/bot_groups.dart';
 import 'package:baocode/bots/bots.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
+import 'package:baocode/kernel/mock/mock_kernels.dart';
 import 'package:baocode/models/codex/codex_service.dart';
 import 'package:baocode/models/model_providers.dart';
 import 'package:baocode/link/chat_codec.dart';
@@ -148,6 +149,81 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 60));
     await pumpEventQueue();
   }
+
+  test('backend choice is opt-in and only available on a draft', () async {
+    final local = Workspace(
+      projects: const [Project('code', '/code')],
+      kernels: MockKernels.all,
+    );
+    final (_, desktop) = await peers();
+    final link = WorkspaceBridge(
+      workspace: local,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'PC', kind: 'pc', system: 'Windows'),
+    )..start();
+    addTearDown(() {
+      link.dispose();
+      local.dispose();
+    });
+    final draft = await link.handle(LinkMethods.draft, {
+      'project': '/code',
+    }) as Map<String, Object?>;
+    final session = draft['session'];
+    Future<LinkSessionUpdate> openDraft({bool supportsBackend = false}) async =>
+        LinkSessionUpdate.fromJson(
+          await link.handle(LinkMethods.open, {
+            'session': session,
+            if (supportsBackend) 'kernelChoices': true,
+          }) as Map<String, Object?>,
+        );
+    Future<Object?> choose(String option) => link.handle(LinkMethods.choose, {
+      'session': session,
+      'kind': 'kernel',
+      'option': option,
+    });
+
+    final original = await openDraft();
+    expect(
+      original.choices.map((choice) => choice.kind),
+      isNot(contains('kernel')),
+    );
+    await expectLater(choose('codex'), throwsA(isA<LinkRemoteException>()));
+
+    final upgraded = await openDraft(supportsBackend: true);
+    final backend = upgraded.choices.singleWhere(
+      (choice) => choice.kind == 'kernel',
+    );
+    expect(backend.selected, 'claude-code');
+    expect(backend.options.map((option) => option.id), [
+      'claude-code',
+      'codex',
+    ]);
+    await expectLater(choose('arbitrary'), throwsA(isA<LinkRemoteException>()));
+
+    await choose('codex');
+    final picked = await openDraft(supportsBackend: true);
+    expect(
+      picked.choices.singleWhere((choice) => choice.kind == 'kernel').selected,
+      'codex',
+    );
+    expect(picked.choices.map((choice) => choice.kind), contains('model'));
+    expect(local.threads.single.kernel.id, 'codex');
+
+    await link.handle(LinkMethods.send, {
+      'session': session,
+      'text': 'Explain this sample project.',
+    });
+    final running = await openDraft(supportsBackend: true);
+    expect(
+      running.choices.map((choice) => choice.kind),
+      isNot(contains('kernel')),
+    );
+    await expectLater(
+      choose('claude-code'),
+      throwsA(isA<LinkRemoteException>()),
+    );
+    await link.handle(LinkMethods.stop, {'session': session});
+  });
 
   group('without a window', () {
     test('gives everything, and says nothing of earlier', () async {

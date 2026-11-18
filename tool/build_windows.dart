@@ -24,6 +24,8 @@
 //                                                  lib/channel/), its
 //                                                  installer named
 //                                                  -setup-channel.exe
+//   dart run tool/build_windows.dart --codex-edition add -codex to the
+//                                                  installer version and name
 //   dart run tool/build_windows.dart --arch arm64   say which processor
 //                                                  flutter builds for: this
 //                                                  machine's (flutter builds
@@ -142,6 +144,7 @@ Future<void> main(List<String> arguments) async {
       ? arguments[releaseAt + 1]
       : 'latest';
   final channel = arguments.contains('--channel');
+  final codexEdition = arguments.contains('--codex-edition');
   final archAt = arguments.indexOf('--arch');
   final arch = archAt >= 0 && archAt + 1 < arguments.length
       ? arguments[archAt + 1]
@@ -256,6 +259,7 @@ Future<void> main(List<String> arguments) async {
     '/DOutDir=${installers.path}',
     '/DArch=$arch',
     if (channel) '/DEdition=-channel',
+    if (codexEdition) '/DVersionSuffix=-codex',
     '${root.path}\\tool\\baocode.iss',
   ], root.path);
 
@@ -276,7 +280,8 @@ Future<void> main(List<String> arguments) async {
 
   _step('Done');
   final installer = File(
-    '${installers.path}\\BaoCode-${version.marketing}-setup'
+    '${installers.path}\\BaoCode-${version.marketing}'
+    '${codexEdition ? '-codex' : ''}-setup'
     '${arch == 'x64' ? '' : '-$arch'}${channel ? '-channel' : ''}.exe',
   );
   for (final file in [installer, ...servers]) {

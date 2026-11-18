@@ -1988,6 +1988,11 @@
     }
   },
   "usageCacheExcludes": "Not counting subagents, compaction or the CLI's side requests",
+  "codexAccountLimits": "Codex account limits",
+  "codexAccountSignIn": "Sign in with the local Codex CLI to see ChatGPT limits.",
+  "codexAccountApiKey": "API key · ChatGPT plan limits do not apply.",
+  "codexAccountChatGpt": "ChatGPT",
+  "codexAccountWindow": "Limit window",
   "usagePlanUsage": "Plan usage",
   "usageThisSession": "This session",
   "usageCheckingLimits": "Checking limits…",

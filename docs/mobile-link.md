@@ -112,6 +112,7 @@ ALPN 是 `baocode/link/2`。iroh 自带 TLS 1.3（双方以各自的 Ed25519 密
 - 文件：`files`（列出项目文件，最多 2 万个，跳过 node_modules 等；附带各会话还没保留的改动）、`read`（读文件，最大 512KB，二进制和过大文件不传；被改过的文件附带改动前的原文，手机据此显示改动）
 - 扩展：`extensions`（本机用户级和各本地项目的技能、MCP、插件、子代理，来自「自定义」用的 `CustomizationStore`）
 - 新对话：`draft`（项目的「新对话」智能体，和桌面端 New Chat 用的同一个，发消息前不出现在列表里）。手机 `open` 它拿到可选的模型、模式、权限、思考强度，用 `choose` 选好，再 `send` 给它，就按选好的设置开始。
+- 支持后端选择的手机端可在打开新对话草稿时传 `open {session, kernelChoices: true}`。只有本地项目、还没发送首条消息、也不属于机器人的草稿才会在 `choices` 中收到 `kind: "kernel"`。用 `choose {session, kind: "kernel", option}` 选择返回的合法选项，再收取新的模型列表；已开始的会话不能更换后端。不传该标记的客户端行为不变。
 - 图片：`image`（`{project, path}` → `{type, data}`，读项目里的 png/jpeg/gif/webp，最大 8MB，超过返回 `{tooLarge, size}`；回复里 `![](路径)` 引用的截图手机靠它显示）
 - 项目图标：`state` 里每个项目带 `icon`（emoji、codicon 加主题色、图片、厂商 logo，格式同桌面端 `ProjectIcon.toJson`）。图片用 `icon`（`{id}` → `{kind, data}`）读取；id 由内容算出，手机按 id 缓存。
 

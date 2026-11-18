@@ -2997,6 +2997,21 @@ class AppLocalizationsZh extends AppLocalizations {
   String get usageCacheExcludes => '不含子智能体、压缩及 CLI 的附带请求';
 
   @override
+  String get codexAccountLimits => 'Codex 账号额度';
+
+  @override
+  String get codexAccountSignIn => '请先在本机 Codex CLI 登录，再查看 ChatGPT 额度。';
+
+  @override
+  String get codexAccountApiKey => 'API 密钥 · 不适用 ChatGPT 套餐额度。';
+
+  @override
+  String get codexAccountChatGpt => 'ChatGPT';
+
+  @override
+  String get codexAccountWindow => '额度窗口';
+
+  @override
   String get usagePlanUsage => '套餐用量';
 
   @override

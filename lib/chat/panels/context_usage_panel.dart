@@ -31,10 +31,12 @@ class ContextUsagePanel extends StatefulWidget {
     required this.usage,
     required this.onClose,
     this.stats,
+    this.accountPanel,
   });
 
   final ContextUsage usage;
   final UsageStats? stats;
+  final Widget? accountPanel;
   final VoidCallback onClose;
 
   static String _format(int tokens) => tokens >= 1000000
@@ -430,6 +432,12 @@ class _ContextUsagePanelState extends State<ContextUsagePanel>
                   ],
                 ),
               ),
+            ],
+            if (widget.accountPanel case final account?) ...[
+              const SizedBox(height: 12),
+              Divider(height: 1, color: AppColors.partBorder),
+              const SizedBox(height: 8),
+              account,
             ],
             if (stats?.cache case final cache?) ...[
               const SizedBox(height: 10),

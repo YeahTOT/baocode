@@ -45,6 +45,7 @@ import 'composer/composer_embeds.dart';
 import 'composer/composer_mock_data.dart';
 import 'composer/file_mentions.dart';
 import 'panels/activity_strip.dart';
+import 'panels/codex_account_summary.dart';
 import 'panels/health_banner.dart';
 import 'panels/interaction_panel.dart';
 import 'panels/limit_reset_panel.dart';
@@ -1655,6 +1656,13 @@ class _ChatScreenState extends State<ChatScreen>
             final usage? when _contextPanelOpen => ContextUsagePanel(
               usage: usage,
               stats: _session.stats,
+              accountPanel: switch (_session.codexAccount) {
+                final account? => CodexAccountSummary(
+                  account: account,
+                  onRefresh: () => unawaited(_session.refreshUsage()),
+                ),
+                null => null,
+              },
               onClose: _toggleContextPanel,
             ),
             _ => null,

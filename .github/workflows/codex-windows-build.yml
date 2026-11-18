@@ -31,19 +31,23 @@ jobs:
         run: flutter test test/kernel_test.dart --plain-name "Codex adapter"
       - name: Test Codex history catalog
         run: flutter test test/codex_catalog_test.dart
+      - name: Test Codex account panel and subagent transcript
+        run: flutter test test/chat/codex_account_summary_test.dart test/codex_subagents_test.dart
+      - name: Test paired phone backend selection
+        run: flutter test test/link/workspace_bridge_test.dart
       - name: Test switching to Codex in the model picker
         run: flutter test test/kernel_ui_test.dart --plain-name "the model picker switches a fresh chat to Codex"
       - name: Build Windows installer
-        run: dart run tool/build_windows.dart --arch x64 --remote-release $env:BAOCODE_REMOTE_VERSION --disable-upstream-updates
+        run: dart run tool/build_windows.dart --arch x64 --remote-release $env:BAOCODE_REMOTE_VERSION --disable-upstream-updates --codex-edition
       - name: Stage installer and SHA-256
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
+          $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-codex-setup.exe')
           if ($files.Count -ne 1) {
             throw "Expected one x64 BaoCode installer; found $($files.Count)"
           }
           $out = New-Item -ItemType Directory -Path build/codex-windows-artifact -Force
-          $name = $files[0].Name -replace '-setup\.exe$', '-codex-x64-setup.exe'
+          $name = $files[0].Name
           $target = Join-Path $out.FullName $name
           Copy-Item -LiteralPath $files[0].FullName -Destination $target
           $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()

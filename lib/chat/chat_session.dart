@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../kernel/agent_kernel.dart';
+import '../kernel/codex/codex_account.dart';
+import '../kernel/codex/codex_kernel.dart';
 import '../kernel/kernel_event.dart';
 import '../kernel/kernel_registry.dart';
 import '../kernel/kernel_types.dart';
@@ -298,6 +300,13 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
 
   KernelHealth get health => _kernel.health;
 
+  /// For the local desktop's context panel only. These are not included
+  /// in the generic conversation state broadcast to paired devices.
+  CodexAccountInfo? get codexAccount => switch (_kernel) {
+    final CodexKernel kernel => kernel.accountInfo,
+    _ => null,
+  };
+
   /// Whether the conversation it continues is still being read.
   bool get loadingHistory => switch (_kernel) {
     LoadsHistory(:final loadingHistory) => loadingHistory,
@@ -510,8 +519,11 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
   /// Asks for the account's limits now (see [ReportsUsage.refreshUsage]);
   /// done once they came.
   Future<void> refreshUsage() async {
-    if (_kernel case final ReportsUsage kernel) {
-      await kernel.refreshUsage();
+    switch (_kernel) {
+      case final CodexKernel kernel:
+        await kernel.refreshAccount();
+      case final ReportsUsage kernel:
+        await kernel.refreshUsage();
     }
   }
 

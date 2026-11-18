@@ -24,6 +24,7 @@ import 'package:baocode/kernel/claude_code/claude_storage_io.dart';
 import 'package:baocode/kernel/claude_code/cli_locator.dart';
 import 'package:baocode/kernel/claude_code/control_channel.dart';
 import 'package:baocode/kernel/claude_code/turn_stats.dart';
+import 'package:baocode/kernel/codex/codex_account.dart';
 import 'package:baocode/kernel/codex/codex_kernel.dart';
 import 'package:baocode/kernel/codex/codex_transport.dart';
 import 'package:baocode/kernel/commit_attribution.dart';
@@ -7607,13 +7608,18 @@ exec /usr/bin/env "\$@"
         expect(events.whereType<HistoryPrepended>(), hasLength(1));
         kernel.send(const KernelTurn(id: 'with-cwd', text: 'hello'));
         await pumpEventQueue();
-        expect(server.written.map((m) => m['method']), [
-          'initialize',
-          'initialized',
-          'model/list',
-          'thread/resume',
-          'turn/start',
-        ]);
+        expect(
+          server.written
+              .map((m) => m['method'])
+              .where((method) => method != 'account/read'),
+          [
+            'initialize',
+            'initialized',
+            'model/list',
+            'thread/resume',
+            'turn/start',
+          ],
+        );
         final params = server.written.last['params'] as Map;
         expect(params['threadId'], 'existing');
         expect(params['cwd'], cwd);
@@ -7640,6 +7646,107 @@ exec /usr/bin/env "\$@"
       );
     });
 
+    test('reads account status and quota without refreshing tokens', () async {
+      kernel.dispose();
+      server = _FakeServer()
+        ..accountResult = {
+          'account': {
+            'type': 'chatgpt',
+            'email': 'test@example.com',
+            'planType': 'pro',
+          },
+          'requiresOpenaiAuth': true,
+        }
+        ..quotaResult = {
+          'rateLimits': {
+            'limitId': 'codex',
+            'primary': {'usedPercent': 10, 'resetsAt': 1730947200},
+          },
+          'rateLimitsByLimitId': {
+            'codex': {
+              'primary': {
+                'usedPercent': 25,
+                'windowDurationMins': 300,
+                'resetsAt': 1730947200,
+              },
+              'secondary': {'usedPercent': 40, 'windowDurationMins': 10080},
+            },
+            'other': {
+              'primary': {'usedPercent': 8},
+            },
+          },
+        };
+      kernel = CodexKernel(
+        MockKernels.codex,
+        server,
+        restartTransport: _FakeServer.new,
+      );
+      kernel.prepare();
+      await pumpEventQueue();
+      expect(kernel.accountInfo.kind, CodexAccountKind.chatgpt);
+      expect(kernel.accountInfo.plan, 'pro');
+      expect(kernel.accountInfo.email, 'test@example.com');
+      expect(kernel.accountInfo.loading, isFalse);
+      final accountRequest = server.written.singleWhere(
+        (m) => m['method'] == 'account/read',
+      );
+      expect(accountRequest['params'], {'refreshToken': false});
+      final quota = kernel.accountInfo.rateLimits;
+      expect(quota.map((bucket) => bucket.id), ['codex', 'other']);
+      expect(quota.first.primary?.usedPercent, 25);
+      expect(quota.first.primary?.windowMinutes, 300);
+      expect(
+        quota.first.primary?.resetsAt?.millisecondsSinceEpoch,
+        1730947200000,
+      );
+      expect(quota.first.secondary?.usedPercent, 40);
+
+      notify('account/rateLimits/updated', {
+        'rateLimits': {
+          'limitId': 'codex',
+          'primary': {'usedPercent': 31},
+        },
+      });
+      expect(kernel.accountInfo.rateLimits.first.primary?.usedPercent, 31);
+      expect(kernel.accountInfo.rateLimits.first.primary?.windowMinutes, 300);
+      expect(kernel.accountInfo.rateLimits.first.secondary?.usedPercent, 40);
+      expect(kernel.accountInfo.rateLimits.last.primary?.usedPercent, 8);
+
+      server.accountResult = {'account': null, 'requiresOpenaiAuth': true};
+      notify('account/updated', {'authMode': null, 'planType': null});
+      await pumpEventQueue();
+      expect(kernel.accountInfo.kind, CodexAccountKind.signedOut);
+      expect(kernel.accountInfo.requiresOpenaiAuth, isTrue);
+      expect(kernel.accountInfo.email, isNull);
+      expect(kernel.accountInfo.rateLimits, isEmpty);
+      expect(
+        server.written.where((m) => m['method'] == 'account/rateLimits/read'),
+        hasLength(1),
+      );
+    });
+
+    test('unsupported account methods do not block coding', () async {
+      kernel.dispose();
+      server = _FakeServer()..rejectAccountRead = true;
+      kernel = CodexKernel(
+        MockKernels.codex,
+        server,
+        restartTransport: _FakeServer.new,
+      );
+      kernel.prepare();
+      await pumpEventQueue();
+      expect(kernel.accountInfo.kind, CodexAccountKind.unknown);
+      expect(kernel.accountInfo.loading, isFalse);
+      expect(kernel.health.status, KernelHealthStatus.ready);
+      kernel.send(const KernelTurn(id: 'old-server', text: 'Still works'));
+      await pumpEventQueue();
+      expect(server.written.last['method'], 'turn/start');
+      expect(
+        server.written.any((m) => m['method'] == 'account/rateLimits/read'),
+        isFalse,
+      );
+    });
+
     test('declares no background tasks and no undo', () {
       expect(kernel, isNot(isA<RunsBackgroundTasks>()));
       expect(kernel, isNot(isA<RevertsChanges>()));
@@ -7654,6 +7761,12 @@ class _FakeServer implements CodexTransport {
       StreamController.broadcast(sync: true);
   final List<Map<String, Object?>> written = [];
   bool rejectNextTurn = false;
+  bool rejectAccountRead = false;
+  Map<String, Object?> accountResult = {
+    'account': null,
+    'requiresOpenaiAuth': false,
+  };
+  Map<String, Object?> quotaResult = {};
 
   @override
   Stream<Map<String, Object?>> get messages => _out.stream;
@@ -7671,7 +7784,16 @@ class _FakeServer implements CodexTransport {
       });
       return;
     }
+    if (message['method'] == 'account/read' && rejectAccountRead) {
+      push({
+        'id': message['id'],
+        'error': {'code': -32601, 'message': 'Method not found'},
+      });
+      return;
+    }
     final result = switch (message['method']) {
+      'account/read' => accountResult,
+      'account/rateLimits/read' => quotaResult,
       'model/list' => {
         'data': [
           {

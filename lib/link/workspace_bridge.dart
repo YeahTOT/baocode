@@ -537,6 +537,11 @@ class WorkspaceBridge {
           pathOf: (full) => _phonePath(thread.project, full),
           sessionOf: _phoneSession,
           quota: quota,
+          // A newer phone opts in. Older clients never see a new choice kind.
+          kernelChoices:
+              params['kernelChoices'] == true &&
+              thread.project.host == null &&
+              bots?.botAt(thread.project.path) == null,
         );
         return follow.start(
           have: [
@@ -639,6 +644,29 @@ class WorkspaceBridge {
         final kind = params['kind'] as String? ?? '';
         final option = params['option'] as String? ?? '';
         final bot = bots?.botAt(thread.project.path);
+        if (kind == 'kernel') {
+          final choice =
+              _follows[idOf(thread)]?.kernelChoices == true &&
+                  thread.project.host == null &&
+                  bot == null
+              ? thread.session.kernelChoice
+              : null;
+          if (choice == null) {
+            throw const LinkRemoteException(
+              LinkErrors.unsupported,
+              'The backend cannot be changed for this conversation',
+            );
+          }
+          final selected = choice.options.where((entry) => entry.id == option);
+          if (selected.isEmpty) {
+            throw const LinkRemoteException(
+              LinkErrors.notFound,
+              'That backend is not available',
+            );
+          }
+          choice.onSelected(selected.first);
+          return null;
+        }
         // A bot's agent asks nothing and works as one: only its model,
         // and how it thinks, are the user's to pick.
         if (bot != null && (kind == 'mode' || kind == 'permission')) {
@@ -1432,6 +1460,7 @@ class _Follow {
     required this.sessionOf,
     this.window,
     this.quota,
+    this.kernelChoices = false,
   });
 
   final String id;
@@ -1449,11 +1478,15 @@ class _Follow {
     sessionOf: sessionOf,
     window: window,
     quota: quota,
+    kernelChoices: kernelChoices,
   );
 
   /// How many of the last items the phone follows at first, if it pages
   /// back through the rest (see [earlier]); null for all of them.
   final int? window;
+
+  /// Whether this opened view understands backend choices.
+  final bool kernelChoices;
 
   /// A changed file's path as the phone names it in the project; null for
   /// one outside it, given as it is.
@@ -1772,6 +1805,7 @@ class _Follow {
     };
     final model = session.models;
     return [
+      if (kernelChoices) ?of('kernel', session.kernelChoice),
       ?of('model', model),
       ?of('mode', session.modes),
       ?of('permission', session.permissions),

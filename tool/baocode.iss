@@ -23,6 +23,11 @@
   #define Edition ""
 #endif
 
+; Optional suffix for the displayed and packaged version, never PE metadata.
+#ifndef VersionSuffix
+  #define VersionSuffix ""
+#endif
+
 ; The processor the bundle was built for (tool/build_windows.dart passes
 ; it): x64, or arm64, whose installer's name says so ("-arm64", before the
 ; edition's). The same app either way: one installs over the other.
@@ -49,14 +54,14 @@
 ; it.
 AppId={{6fdd732b-95c6-4c37-af6f-ff574358deb5}
 AppName=BaoCode
-AppVersion={#VersionNumber}
+AppVersion={#VersionNumber}{#VersionSuffix}
 AppPublisher=BaoCode
-AppVerName=BaoCode {#VersionNumber}
+AppVerName=BaoCode {#VersionNumber}{#VersionSuffix}
 DefaultDirName={autopf}\BaoCode
 DefaultGroupName=BaoCode
 UninstallDisplayName=BaoCode
 UninstallDisplayIcon={app}\baocode.exe
-OutputBaseFilename=BaoCode-{#VersionNumber}-setup{#ArchSuffix}{#Edition}
+OutputBaseFilename=BaoCode-{#VersionNumber}{#VersionSuffix}-setup{#ArchSuffix}{#Edition}
 OutputDir={#OutDir}
 ; What Explorer shows for the installer itself. Windows wants four numbers,
 ; where pubspec's version has three.

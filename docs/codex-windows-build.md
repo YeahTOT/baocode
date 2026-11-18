@@ -6,6 +6,22 @@ Claude。安装包不会打包 Codex 凭据，也不包含 Codex CLI。使用 Co
 可用（安装或调整 PATH 后重新启动 BaoCode）。如果只找到 npm 的命令脚本或无 PATH 入口，
 设置环境变量 `BAOCODE_CODEX_PATH` 为官方 `codex.exe` 的绝对路径后重启。
 
+## Codex 会话与手机连接
+
+- 新建会话时在模型选择器选 **Codex**，也可在「设置 → 通用」设为默认。
+  从历史打开 Codex 会话会恢复本机 App Server 上的原会话。新版协议下
+  先读最近一页，向上滚动加载更早轮次；旧版 Codex 会使用恢复接口返回的历史。
+- 展开输入框附近的上下文用量面板，下面会单独显示本机 Codex 登录账号和
+  ChatGPT 剩余额度。API 密钥登录不显示 ChatGPT 套餐额度；旧版 App Server
+  不支持查询或没有返回额度时，不会把未知额度显示为 0%。
+- Codex 回传的子 Agent 进度显示在主会话中。这不是独立的子 Agent 聊天窗口，
+  也不提供对子 Agent 的单独指令或中断。
+- 手机走 BaoCode 现有的配对通道，可在桌面端「设置 → 手机 → 中继」选择
+  自己部署的中继。中继转发加密流量，不托管 Codex；桌面必须在线且安装过
+  Codex CLI。不要直接把 App Server 端口暴露到公网。新建会话时在手机上
+  选择后端需要新版手机端适配，不能仅靠升级这个 Windows 安装包。
+  详见[手机连接](mobile-link.md)。
+
 ## Windows 本机编译
 
 需要 x64 Windows、Flutter stable **3.47.5**、带「使用 C++ 的桌面开发」
@@ -17,10 +33,12 @@ Claude。安装包不会打包 Codex 凭据，也不包含 Codex CLI。使用 Co
 flutter pub get
 flutter test test/kernel_test.dart --plain-name "Codex adapter"
 flutter test test/codex_catalog_test.dart
-dart run tool/build_windows.dart --arch x64 --remote-release 2.0.2.35-d0c299e2b113 --disable-upstream-updates
+dart run tool/build_windows.dart --arch x64 --remote-release 2.0.2.35-d0c299e2b113 --disable-upstream-updates --codex-edition
 ```
 
-安装包输出到 `build/installers/BaoCode-<版本>-setup.exe`。
+安装包输出到 `build/installers/BaoCode-<官方版本>-codex-setup.exe`，例如
+`BaoCode-2.0.2-codex-setup.exe`。安装器显示同样的版本后缀；Windows 可执行文件
+的数字版本仍沿用上游。省略 `--codex-edition` 不会改变原有打包命名。
 `--remote-release` 固定使用 BaoCode v2.0.2 的官方远程组件清单，不重新构建
 SSH 远程组件；这一项不会为远程项目启用 Codex 后端。构建脚本还会从官方
 Microsoft 发布获取并校验它打包的 OpenSSH 组件。

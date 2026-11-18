@@ -8,8 +8,10 @@ import '../../chat/chat_models.dart';
 import '../agent_kernel.dart';
 import '../kernel_event.dart';
 import '../kernel_types.dart';
+import 'codex_account.dart';
 import 'codex_catalog.dart';
 import 'codex_history.dart';
+import 'codex_subagents.dart';
 import 'codex_transport.dart';
 
 /// Adapts `codex app-server` to [AgentKernel]. This adapter does not expose
@@ -23,6 +25,7 @@ class CodexKernel
         SelectsMode,
         ReportsContext,
         RewindsConversation,
+        LoadsHistory,
         AcceptsImages {
   CodexKernel(
     this.descriptor,
@@ -48,8 +51,143 @@ class CodexKernel
   bool _transportFailed = false;
   bool _threadAttached = false;
   bool _historyLoaded = false;
+  CodexHistoryPager? _historyPager;
+  Future<void>? _readingEarlier;
   String? _title;
   Future<void> _catalogWrites = Future.value();
+
+  CodexAccountInfo _accountInfo = const CodexAccountInfo();
+  Future<void>? _accountRefresh;
+  int _accountEpoch = 0;
+  int _quotaEpoch = 0;
+  final Map<String, int> _quotaRevisions = {};
+
+  CodexAccountInfo get accountInfo => _accountInfo;
+
+  void _setAccount(CodexAccountInfo value) {
+    if (_disposed) return;
+    _accountInfo = value;
+    emitInfoChanged();
+  }
+
+  /// Reads currently active credentials' metadata and ChatGPT quota only.
+  /// Authentication remains entirely with the local Codex CLI.
+  Future<void> refreshAccount() {
+    if (_disposed || _transportFailed || _restartTransport == null) {
+      return Future.value();
+    }
+    final pending = _accountRefresh;
+    if (pending != null) return pending;
+    final epoch = _accountEpoch;
+    final future = _readAccount(epoch);
+    _accountRefresh = future;
+    return future.whenComplete(() {
+      if (identical(_accountRefresh, future)) _accountRefresh = null;
+    });
+  }
+
+  bool _canReadAccount(int epoch) =>
+      !_disposed && !_transportFailed && epoch == _accountEpoch;
+
+  Future<void> _readAccount(int epoch) async {
+    _setAccount(
+      _accountInfo.withRateLimits(
+        _accountInfo.rateLimits,
+        unavailable: _accountInfo.rateLimitsUnavailable,
+        loading: true,
+      ),
+    );
+    try {
+      await _initialize();
+      if (!_canReadAccount(epoch)) return;
+      final result = await _request('account/read', {
+        'refreshToken': false,
+      }, timeout: const Duration(seconds: 8));
+      if (!_canReadAccount(epoch)) return;
+      final account = CodexAccountInfo.fromResult(result);
+      if (account.kind != CodexAccountKind.chatgpt) {
+        _setAccount(account);
+        return;
+      }
+      final retained =
+          _accountInfo.kind == account.kind &&
+              _accountInfo.email == account.email &&
+              _accountInfo.plan == account.plan
+          ? _accountInfo.rateLimits
+          : const <CodexRateLimitBucket>[];
+      if (retained.isEmpty) _quotaRevisions.clear();
+      _setAccount(account.withRateLimits(retained, loading: true));
+      final quotaEpoch = _quotaEpoch;
+      try {
+        final snapshot = await _request(
+          'account/rateLimits/read',
+          const {},
+          timeout: const Duration(seconds: 8),
+        );
+        if (!_canReadAccount(epoch)) return;
+        final buckets = CodexRateLimitBucket.fromResult(snapshot);
+        // An incoming update can be newer than an overlapping read. Keep the
+        // update for its bucket, filling in any other buckets from the read.
+        final current = _accountInfo.rateLimits;
+        final merged = quotaEpoch == _quotaEpoch
+            ? buckets
+            : {
+                for (final bucket in buckets) bucket.id: bucket,
+                for (final bucket in current)
+                  if ((_quotaRevisions[bucket.id] ?? 0) > quotaEpoch)
+                    bucket.id: bucket,
+              }.values.toList();
+        _setAccount(
+          account.withRateLimits(merged, unavailable: merged.isEmpty),
+        );
+      } catch (_) {
+        if (_canReadAccount(epoch)) {
+          final updated = _accountInfo.rateLimits
+              .where((bucket) => (_quotaRevisions[bucket.id] ?? 0) > quotaEpoch)
+              .toList();
+          _setAccount(
+            account.withRateLimits(updated, unavailable: updated.isEmpty),
+          );
+        }
+      }
+    } catch (_) {
+      // Older servers can omit these account methods. That must not stop
+      // the coding adapter or turn a connection into a login failure.
+      if (_canReadAccount(epoch)) _setAccount(const CodexAccountInfo());
+    }
+  }
+
+  void _accountUpdated() {
+    if (_disposed || _transportFailed || _restartTransport == null) return;
+    _accountEpoch++;
+    _accountRefresh = null;
+    _quotaRevisions.clear();
+    _setAccount(const CodexAccountInfo());
+    unawaited(refreshAccount());
+  }
+
+  void _quotaUpdated(Map<String, Object?> payload) {
+    if (_accountInfo.kind != CodexAccountKind.chatgpt) return;
+    final updates = CodexRateLimitBucket.fromResult(
+      payload,
+      previous: _accountInfo.rateLimits,
+    );
+    if (updates.isEmpty) return;
+    _quotaEpoch++;
+    for (final bucket in updates) {
+      _quotaRevisions[bucket.id] = _quotaEpoch;
+    }
+    final buckets = {
+      for (final bucket in _accountInfo.rateLimits) bucket.id: bucket,
+      for (final bucket in updates) bucket.id: bucket,
+    };
+    _setAccount(
+      _accountInfo.withRateLimits(
+        buckets.values.toList(),
+        loading: _accountInfo.loading,
+      ),
+    );
+  }
 
   void _listen() {
     _subscription = _transport.messages.listen(
@@ -182,6 +320,7 @@ class CodexKernel
 
   /// Commands started and not completed yet, as they started.
   final Map<String, Map<String, Object?>> _commands = {};
+  final _subagents = CodexSubagents(DateTime.now);
 
   /// Pending approvals: our request id → the server's JSON-RPC id.
   final Map<String, Object?> _approvals = {};
@@ -190,8 +329,9 @@ class CodexKernel
 
   Future<Map<String, Object?>> _request(
     String method,
-    Map<String, Object?> params,
-  ) {
+    Map<String, Object?> params, {
+    Duration timeout = const Duration(seconds: 30),
+  }) {
     final id = ++_requests;
     final response = Completer<Map<String, Object?>>();
     _responses[id] = response;
@@ -201,7 +341,7 @@ class CodexKernel
       _responses.remove(id)?.completeError(error, stack);
     }
     return response.future.timeout(
-      const Duration(seconds: 30),
+      timeout,
       onTimeout: () {
         _responses.remove(id);
         throw TimeoutException('Codex did not answer $method.');
@@ -212,6 +352,10 @@ class CodexKernel
   void _connectionFailed(Object error) {
     if (_disposed || _transportFailed) return;
     _transportFailed = true;
+    _accountEpoch++;
+    _accountRefresh = null;
+    _quotaRevisions.clear();
+    _accountInfo = const CodexAccountInfo();
     _health = KernelHealth(
       KernelHealthStatus.failed,
       message: 'Codex App Server: $error',
@@ -270,6 +414,9 @@ class CodexKernel
     }
     _health = KernelHealth.ready;
     emitInfoChanged();
+    if (_restartTransport != null && _accountRefresh == null) {
+      unawaited(refreshAccount());
+    }
   }();
 
   Future<void> _attachThread() {
@@ -281,7 +428,8 @@ class CodexKernel
           threadId == null ? 'thread/start' : 'thread/resume',
           {
             'threadId': ?threadId,
-            if (threadId != null) 'excludeTurns': _historyLoaded,
+            if (threadId != null)
+              'excludeTurns': _historyLoaded || _restartTransport != null,
             if (threadId == null && model.selected != null)
               'model': model.selected,
             'cwd': ?_context.cwd,
@@ -294,25 +442,7 @@ class CodexKernel
               when model.options.any((option) => option.id == resumedModel)) {
             model.reported = resumedModel;
           }
-          var history = CodexHistory.itemsFromThread(thread);
-          if (history.isEmpty && _restartTransport != null) {
-            try {
-              final page = await _request('thread/turns/list', {
-                'threadId': threadId,
-                'itemsView': 'full',
-                'sortDirection': 'desc',
-                'limit': 20,
-              });
-              final turns = (page['data'] as List? ?? const []).reversed;
-              history = CodexHistory.itemsFromThread({'turns': turns.toList()});
-            } on StateError {
-              // Older servers return the history as part of thread/resume or
-              // may not support pagination on an empty thread.
-            }
-          }
-          if (history.isNotEmpty && !_disposed) {
-            emit(HistoryPrepended(nextSeq, history));
-          }
+          await _initialHistory(threadId, thread);
         }
         _threadAttached = true;
         _historyLoaded = true;
@@ -321,6 +451,68 @@ class CodexKernel
         _attaching = null;
       }
     }();
+  }
+
+  @override
+  bool get loadingHistory =>
+      _context.resume != null && !_historyLoaded && !_transportFailed;
+
+  @override
+  bool get hasEarlierHistory =>
+      _historyLoaded && (_historyPager?.hasEarlier ?? false);
+
+  @override
+  bool get loadingEarlier => _readingEarlier != null;
+
+  Future<void> _initialHistory(String threadId, Map thread) async {
+    var history = CodexHistory.itemsFromThread(thread);
+    if (history.isEmpty && _restartTransport != null) {
+      final pager = CodexHistoryPager(threadId, _request);
+      try {
+        history = await pager.loadEarlier();
+        _historyPager = pager;
+      } on StateError {
+        // Older CLI builds may not support the paging method. They retain
+        // one legacy snapshot endpoint; don't keep retrying it as a page.
+        final result = await _request('thread/read', {
+          'threadId': threadId,
+          'includeTurns': true,
+        });
+        history = CodexHistory.itemsFromThread(result['thread']);
+      }
+    }
+    if (history.isNotEmpty && !_disposed) {
+      emit(HistoryPrepended(nextSeq, history));
+    }
+  }
+
+  @override
+  Future<void> loadEarlier() {
+    if (_readingEarlier case final pending?) return pending;
+    final pager = _historyPager;
+    if (_disposed || _transportFailed || pager == null || !pager.hasEarlier) {
+      return Future.value();
+    }
+    final transport = _transport;
+    final pending = () async {
+      try {
+        final history = await pager.loadEarlier();
+        if (!_disposed &&
+            identical(transport, _transport) &&
+            history.isNotEmpty) {
+          emit(HistoryPrepended(nextSeq, history));
+        }
+      } catch (_) {
+        // Retain the cursor for retry. Never turn a failed scrollback request
+        // into a failed coding turn.
+      } finally {
+        _readingEarlier = null;
+        if (!_disposed) emitInfoChanged();
+      }
+    }();
+    _readingEarlier = pending;
+    emitInfoChanged();
+    return pending;
   }
 
   void _rememberTurn(String text) {
@@ -540,6 +732,12 @@ class CodexKernel
     }
     if (params?['threadId'] case final String id when id != _threadId) return;
     switch (method) {
+      case 'account/updated':
+        // Capabilities can emit while a synchronous test transport is still
+        // dispatching the notification; do not reenter that stream.
+        scheduleMicrotask(_accountUpdated);
+      case 'account/rateLimits/updated':
+        _quotaUpdated(params ?? const {});
       case 'turn/started':
         if (_turn == null) return;
         _serverTurn = (params!['turn'] as Map)['id'] as String;
@@ -649,6 +847,13 @@ class CodexKernel
   void _itemStarted(Map<String, Object?> item) {
     final id = item['id'] as String;
     switch (item['type']) {
+      case 'collabAgentToolCall' || 'subAgentActivity':
+        for (final (key, card) in _subagents.apply(
+          item,
+          parentThreadId: _threadId,
+        )) {
+          emit(ItemUpserted(nextSeq, key, card));
+        }
       case 'reasoning':
         _reasoning[id] = StringBuffer();
         _reasoningClock[id] = Stopwatch()..start();
@@ -680,6 +885,13 @@ class CodexKernel
   void _itemCompleted(Map<String, Object?> item) {
     final id = item['id'] as String;
     switch (item['type']) {
+      case 'collabAgentToolCall' || 'subAgentActivity':
+        for (final (key, card) in _subagents.apply(
+          item,
+          parentThreadId: _threadId,
+        )) {
+          emit(ItemUpserted(nextSeq, key, card));
+        }
       case 'reasoning':
         final buffer = _reasoning.remove(id);
         final clock = _reasoningClock.remove(id)?..stop();

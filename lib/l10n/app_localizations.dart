@@ -5300,6 +5300,36 @@ abstract class AppLocalizations {
   /// **'Not counting subagents, compaction or the CLI\'s side requests'**
   String get usageCacheExcludes;
 
+  /// No description provided for @codexAccountLimits.
+  ///
+  /// In en, this message translates to:
+  /// **'Codex account limits'**
+  String get codexAccountLimits;
+
+  /// No description provided for @codexAccountSignIn.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in with the local Codex CLI to see ChatGPT limits.'**
+  String get codexAccountSignIn;
+
+  /// No description provided for @codexAccountApiKey.
+  ///
+  /// In en, this message translates to:
+  /// **'API key · ChatGPT plan limits do not apply.'**
+  String get codexAccountApiKey;
+
+  /// No description provided for @codexAccountChatGpt.
+  ///
+  /// In en, this message translates to:
+  /// **'ChatGPT'**
+  String get codexAccountChatGpt;
+
+  /// No description provided for @codexAccountWindow.
+  ///
+  /// In en, this message translates to:
+  /// **'Limit window'**
+  String get codexAccountWindow;
+
   /// No description provided for @usagePlanUsage.
   ///
   /// In en, this message translates to:
