@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -7,34 +8,66 @@ import '../../chat/chat_models.dart';
 import '../agent_kernel.dart';
 import '../kernel_event.dart';
 import '../kernel_types.dart';
+import 'codex_catalog.dart';
+import 'codex_history.dart';
 import 'codex_transport.dart';
 
-/// Adapts `codex app-server` to [AgentKernel]. Codex keeps no background
-/// commands and cannot put files back, so it does not declare
-/// [RunsBackgroundTasks] or [RevertsChanges]: those parts of the UI are not
-/// shown for it.
+/// Adapts `codex app-server` to [AgentKernel]. This adapter does not expose
+/// background tasks or file undo through BaoCode. Conversation rollback is
+/// distinct from reverting workspace files.
 class CodexKernel
     with KernelEventSource
     implements
         AgentKernel,
         SelectsModel,
         SelectsMode,
-        ProvidesCommands,
         ReportsContext,
         RewindsConversation,
         AcceptsImages {
-  CodexKernel(this.descriptor, this._transport) {
-    _subscription = _transport.messages.listen(_receive);
+  CodexKernel(
+    this.descriptor,
+    this._transport, {
+    KernelContext context = const KernelContext(),
+    CodexTransport Function()? restartTransport,
+  }) : _context = context,
+       _restartTransport = restartTransport,
+       _threadId = context.resume?.id,
+       _title = context.resume?.title {
+    if (restartTransport == null) _health = KernelHealth.ready;
+    _listen();
   }
 
   @override
   final KernelDescriptor descriptor;
-  final CodexTransport _transport;
-  late final StreamSubscription<Map<String, Object?>> _subscription;
+  final KernelContext _context;
+  final CodexTransport Function()? _restartTransport;
+  CodexTransport _transport;
+  late StreamSubscription<Map<String, Object?>> _subscription;
+  Future<void>? _initializing;
+  bool _disposed = false;
+  bool _transportFailed = false;
+  bool _threadAttached = false;
+  bool _historyLoaded = false;
+  String? _title;
+  Future<void> _catalogWrites = Future.value();
+
+  void _listen() {
+    _subscription = _transport.messages.listen(
+      (message) {
+        try {
+          _receive(message);
+        } catch (_) {
+          _connectionFailed('Codex returned an invalid protocol message.');
+        }
+      },
+      onError: (Object error) => _connectionFailed(error),
+      onDone: () => _connectionFailed('The Codex process exited.'),
+    );
+  }
 
   @override
-  late final KernelChoiceSource model = LocalChoice(
-    _models,
+  late final LocalChoice model = LocalChoice(
+    _restartTransport == null ? _models : const [],
     onChanged: (_) => emitInfoChanged(),
   );
 
@@ -44,23 +77,55 @@ class CodexKernel
     onChanged: (_) => emitInfoChanged(),
   );
 
-  @override
-  KernelHealth get health => KernelHealth.ready;
+  KernelHealth _health = KernelHealth.idle;
 
   @override
-  String? get sessionId => null;
+  KernelHealth get health => _health;
 
   @override
-  Future<void> get stopped => Future.value();
+  String? get sessionId => _threadId;
 
   @override
-  void prepare() {}
+  Future<void> get stopped async {
+    final transport = _transport;
+    if (transport is ManagedCodexTransport) await transport.stopped;
+    await _catalogWrites;
+  }
+
+  @override
+  void prepare() {
+    if (_disposed || _restartTransport == null || _transportFailed) return;
+    final transport = _transport;
+    unawaited(() async {
+      try {
+        await _initialize();
+        if (_context.resume != null && !_historyLoaded && _turn == null) {
+          await _attachThread();
+        }
+      } catch (error) {
+        if (identical(transport, _transport)) _connectionFailed(error);
+      }
+    }());
+  }
 
   @override
   void release() {}
 
   @override
-  void restart() {}
+  void restart() {
+    final create = _restartTransport;
+    if (_disposed || !_transportFailed || create == null) return;
+    unawaited(_subscription.cancel());
+    _transport.close();
+    _transport = create();
+    _transportFailed = false;
+    _threadAttached = false;
+    _initializing = null;
+    _serverTurn = null;
+    _attaching = null;
+    _listen();
+    prepare();
+  }
 
   static const _models = [
     KernelOption(
@@ -90,32 +155,13 @@ class CodexKernel
   ];
 
   @override
-  final List<KernelCommand> commands = const [
-    KernelCommand(
-      'review',
-      'Review uncommitted changes',
-      Icons.rate_review_outlined,
-    ),
-    KernelCommand(
-      'compact',
-      'Summarize the conversation',
-      Icons.compress_rounded,
-    ),
-    KernelCommand(
-      'init',
-      'Write an AGENTS.md for this project',
-      Icons.description_outlined,
-    ),
-    KernelCommand('diff', 'Show the git diff', Icons.difference_outlined),
-    KernelCommand('new', 'Start a new chat', Icons.add_comment_outlined),
-  ];
-
-  @override
   int get contextWindow => 272000;
 
   int _requests = 0;
   final Map<Object, Completer<Map<String, Object?>>> _responses = {};
-  bool _initialized = false;
+  Future<void>? _attaching;
+  bool _cancelRequested = false;
+  bool _interruptSent = false;
   String? _threadId;
 
   /// Ours, and the server's for the same turn once it says.
@@ -149,15 +195,181 @@ class CodexKernel
     final id = ++_requests;
     final response = Completer<Map<String, Object?>>();
     _responses[id] = response;
-    _transport.write({'id': id, 'method': method, 'params': params});
-    return response.future;
+    try {
+      _transport.write({'id': id, 'method': method, 'params': params});
+    } catch (error, stack) {
+      _responses.remove(id)?.completeError(error, stack);
+    }
+    return response.future.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {
+        _responses.remove(id);
+        throw TimeoutException('Codex did not answer $method.');
+      },
+    );
+  }
+
+  void _connectionFailed(Object error) {
+    if (_disposed || _transportFailed) return;
+    _transportFailed = true;
+    _health = KernelHealth(
+      KernelHealthStatus.failed,
+      message: 'Codex App Server: $error',
+    );
+    final responses = _responses.values.toList();
+    _responses.clear();
+    for (final response in responses) {
+      response.completeError(StateError('The Codex connection closed.'));
+    }
+    _transport.close();
+    if (_turn case final turn?) {
+      _reportTurnError(turn, _health.message!);
+    }
+    emitInfoChanged();
+  }
+
+  void _reportTurnError(String turn, String message) {
+    emit(
+      ItemUpserted(
+        nextSeq,
+        '$turn:error',
+        NoticeItem(NoticeKind.error, message),
+      ),
+    );
+    _endTurn(turn, interrupted: true);
+  }
+
+  Future<void> _initialize() => _initializing ??= () async {
+    _health = const KernelHealth(KernelHealthStatus.starting);
+    emitInfoChanged();
+    await _request('initialize', {
+      'clientInfo': {'name': 'baocode', 'title': 'BaoCode', 'version': '1.0.0'},
+    });
+    if (_disposed) return;
+    _transport.write({'method': 'initialized'});
+    if (_restartTransport != null) {
+      final result = await _request('model/list', {'limit': 100});
+      final models = <KernelOption>[];
+      String? defaultModel;
+      for (final raw in result['data'] as List? ?? const []) {
+        if (raw is! Map || raw['hidden'] == true) continue;
+        final id = raw['id'] ?? raw['model'];
+        if (id is! String || id.isEmpty) continue;
+        models.add(
+          KernelOption(
+            id,
+            raw['displayName'] as String? ?? id,
+            Icons.bolt_rounded,
+            raw['description'] as String? ?? '',
+          ),
+        );
+        if (raw['isDefault'] == true) defaultModel = id;
+      }
+      model.options = models;
+      model.reported = defaultModel;
+    }
+    _health = KernelHealth.ready;
+    emitInfoChanged();
+  }();
+
+  Future<void> _attachThread() {
+    if (_threadAttached) return Future.value();
+    return _attaching ??= () async {
+      try {
+        final threadId = _threadId;
+        final started = await _request(
+          threadId == null ? 'thread/start' : 'thread/resume',
+          {
+            'threadId': ?threadId,
+            if (threadId != null) 'excludeTurns': _historyLoaded,
+            if (threadId == null && model.selected != null)
+              'model': model.selected,
+            'cwd': ?_context.cwd,
+          },
+        );
+        final thread = started['thread'] as Map;
+        _threadId = thread['id'] as String;
+        if (threadId != null && !_historyLoaded) {
+          if (started['model'] case final String resumedModel
+              when model.options.any((option) => option.id == resumedModel)) {
+            model.reported = resumedModel;
+          }
+          var history = CodexHistory.itemsFromThread(thread);
+          if (history.isEmpty && _restartTransport != null) {
+            try {
+              final page = await _request('thread/turns/list', {
+                'threadId': threadId,
+                'itemsView': 'full',
+                'sortDirection': 'desc',
+                'limit': 20,
+              });
+              final turns = (page['data'] as List? ?? const []).reversed;
+              history = CodexHistory.itemsFromThread({'turns': turns.toList()});
+            } on StateError {
+              // Older servers return the history as part of thread/resume or
+              // may not support pagination on an empty thread.
+            }
+          }
+          if (history.isNotEmpty && !_disposed) {
+            emit(HistoryPrepended(nextSeq, history));
+          }
+        }
+        _threadAttached = true;
+        _historyLoaded = true;
+        emitInfoChanged();
+      } finally {
+        _attaching = null;
+      }
+    }();
+  }
+
+  void _rememberTurn(String text) {
+    final catalog = descriptor.catalog;
+    final id = _threadId;
+    final cwd = _context.cwd;
+    if (catalog is! CodexCatalog || id == null || cwd == null) return;
+    final prompt = text.split('\n').first.trim();
+    if ((_title ?? '').isEmpty && prompt.isNotEmpty) {
+      _title = String.fromCharCodes(prompt.runes.take(100));
+    }
+    final record = SessionRecord(
+      id: id,
+      title: _title ?? '',
+      cwd: cwd,
+      updatedAt: DateTime.now(),
+    );
+    _catalogWrites = _catalogWrites.then((_) async {
+      try {
+        await catalog.remember(record);
+      } catch (_) {
+        if (!_disposed) {
+          emit(
+            ItemUpserted(
+              nextSeq,
+              '$id:catalog-error',
+              const NoticeItem(
+                NoticeKind.error,
+                'Could not save this Codex thread to the BaoCode history list.',
+              ),
+            ),
+          );
+        }
+      }
+    });
   }
 
   @override
   void send(KernelTurn turn) {
-    if (!_sentTurns.add(turn.id)) return;
+    if (_disposed ||
+        _transportFailed ||
+        _turn != null ||
+        !_sentTurns.add(turn.id)) {
+      return;
+    }
     _turn = turn.id;
     _turnStarted = DateTime.now();
+    _cancelRequested = false;
+    _interruptSent = false;
     emit(TurnStarted(nextSeq, turn.id));
     emit(
       ItemUpserted(
@@ -166,42 +378,74 @@ class CodexKernel
         UserMessageItem(text: turn.text, images: turn.images),
       ),
     );
-    unawaited(_start(turn));
+    final transport = _transport;
+    unawaited(() async {
+      try {
+        await _start(turn);
+      } on TimeoutException catch (error) {
+        if (identical(transport, _transport)) _connectionFailed(error);
+      } catch (error) {
+        if (_turn == turn.id) _reportTurnError(turn.id, 'Codex: $error');
+        if (_health.status == KernelHealthStatus.starting &&
+            identical(transport, _transport)) {
+          _connectionFailed(error);
+        }
+      }
+    }());
   }
 
   Future<void> _start(KernelTurn turn) async {
-    if (!_initialized) {
-      _initialized = true;
-      await _request('initialize', {
-        'clientInfo': {'name': 'baocode', 'version': '1.0.0'},
-      });
+    await _initialize();
+    if (_turn != turn.id) return;
+    if (_cancelRequested) {
+      _endTurn(turn.id, interrupted: true);
+      return;
     }
-    if (_threadId == null) {
-      final started = await _request('thread/start', {'model': model.selected});
-      _threadId = (started['thread'] as Map)['id'] as String;
+    await _attachThread();
+    if (_turn != turn.id) return;
+    if (_cancelRequested) {
+      _endTurn(turn.id, interrupted: true);
+      return;
     }
     final readOnly = mode.selected == 'ask';
     final started = await _request('turn/start', {
       'threadId': _threadId,
+      'cwd': ?_context.cwd,
       'input': [
         {'type': 'text', 'text': turn.text},
         for (final note in turn.notes) {'type': 'text', 'text': note},
+        for (final image in turn.images)
+          {
+            'type': 'image',
+            'url':
+                'data:${image.mediaType};base64,${base64Encode(image.bytes)}',
+          },
       ],
-      'model': model.selected,
+      'model': ?model.selected,
       'approvalPolicy': readOnly ? 'never' : 'on-request',
       'sandboxPolicy': {'type': readOnly ? 'readOnly' : 'workspaceWrite'},
     });
+    if (!_disposed) _rememberTurn(turn.text);
+    if (_turn != turn.id || _disposed) return;
     _serverTurn ??= (started['turn'] as Map)['id'] as String;
-    // Stopped before the server knew the turn: stop it there too.
-    if (_turn != turn.id) _interrupt();
+    if (_cancelRequested) _interrupt();
   }
 
   void _interrupt() {
     final serverTurn = _serverTurn;
-    if (serverTurn == null || _threadId == null) return;
-    unawaited(
-      _request('turn/interrupt', {'threadId': _threadId, 'turnId': serverTurn}),
-    );
+    final threadId = _threadId;
+    if (serverTurn == null || threadId == null || _interruptSent) return;
+    _interruptSent = true;
+    unawaited(() async {
+      try {
+        await _request('turn/interrupt', {
+          'threadId': threadId,
+          'turnId': serverTurn,
+        });
+      } catch (error) {
+        if (_serverTurn == serverTurn) _connectionFailed(error);
+      }
+    }());
   }
 
   @override
@@ -225,8 +469,8 @@ class CodexKernel
   void cancel() {
     final turn = _turn;
     if (turn == null) return;
+    _cancelRequested = true;
     _interrupt();
-    _endTurn(turn, interrupted: true);
   }
 
   @override
@@ -237,9 +481,22 @@ class CodexKernel
     String? lastSeen,
   }) async {
     if (_threadId case final threadId? when turns > 0) {
-      unawaited(
-        _request('thread/rollback', {'threadId': threadId, 'numTurns': turns}),
-      );
+      try {
+        await _attachThread();
+        await _request('thread/rollback', {
+          'threadId': threadId,
+          'numTurns': turns,
+        });
+      } catch (error) {
+        emit(
+          ItemUpserted(
+            nextSeq,
+            '$itemId:rewind',
+            NoticeItem(NoticeKind.error, 'Codex: $error'),
+          ),
+        );
+        return false;
+      }
     }
     emit(Rewound(nextSeq, itemId: itemId, index: index));
     return true;
@@ -247,7 +504,14 @@ class CodexKernel
 
   @override
   void dispose() {
+    _disposed = true;
+    _turn = null;
     unawaited(_subscription.cancel());
+    final responses = _responses.values.toList();
+    _responses.clear();
+    for (final response in responses) {
+      response.completeError(StateError('Codex session closed.'));
+    }
     _transport.close();
     closeEvents();
   }
@@ -258,23 +522,39 @@ class CodexKernel
     final method = message['method'] as String?;
     final params = (message['params'] as Map?)?.cast<String, Object?>();
     if (method == null) {
+      final response = _responses.remove(message['id']);
+      if (response == null) return;
+      if (message['error'] case final Map error) {
+        response.completeError(
+          StateError(error['message'] as String? ?? 'Codex RPC failed.'),
+        );
+        return;
+      }
       final result = (message['result'] as Map?)?.cast<String, Object?>();
-      _responses.remove(message['id'])?.complete(result ?? const {});
+      response.complete(result ?? const {});
       return;
     }
     if (message.containsKey('id')) {
       _serverRequest(message['id'], method, params ?? const {});
       return;
     }
+    if (params?['threadId'] case final String id when id != _threadId) return;
     switch (method) {
       case 'turn/started':
+        if (_turn == null) return;
         _serverTurn = (params!['turn'] as Map)['id'] as String;
+        if (_cancelRequested) _interrupt();
       case 'turn/completed':
         final turn = params!['turn'] as Map;
-        if (turn['id'] != _serverTurn) return;
+        if (_serverTurn != null && turn['id'] != _serverTurn) return;
         _serverTurn = null;
         if (_turn case final ours?) {
-          _endTurn(ours, interrupted: turn['status'] == 'interrupted');
+          if (turn['status'] == 'failed') {
+            final error = (turn['error'] as Map?)?['message'] ?? 'Turn failed.';
+            _reportTurnError(ours, 'Codex: $error');
+          } else {
+            _endTurn(ours, interrupted: turn['status'] == 'interrupted');
+          }
         }
       case 'item/started':
         _itemStarted((params!['item'] as Map).cast<String, Object?>());
@@ -330,7 +610,25 @@ class CodexKernel
       'item/fileChange/requestApproval' => ('Apply changes', null),
       _ => (null, null),
     };
-    if (title == null) return;
+    if (title == null) {
+      _transport.write({
+        'id': rpcId,
+        'error': {'code': -32601, 'message': 'Unsupported server request'},
+      });
+      return;
+    }
+    final threadId = params['threadId'];
+    final turnId = params['turnId'];
+    if (_turn == null ||
+        _cancelRequested ||
+        (threadId != null && threadId != _threadId) ||
+        (turnId != null && _serverTurn != null && turnId != _serverTurn)) {
+      _transport.write({
+        'id': rpcId,
+        'result': {'decision': 'decline'},
+      });
+      return;
+    }
     final id = 'approval:$rpcId';
     _approvals[id] = rpcId;
     emit(
@@ -417,6 +715,11 @@ class CodexKernel
         _startedAt.remove(id);
         _commands.remove(id);
       case 'fileChange':
+        // A declined or failed patch is not a confirmed workspace edit.
+        if (item['status'] case final String status
+            when status != 'completed') {
+          return;
+        }
         final changes = item['changes'] as List<Object?>;
         for (final (index, raw) in changes.indexed) {
           final change = raw as Map;
@@ -438,7 +741,10 @@ class CodexKernel
         (action as Map).cast<String, Object?>(),
     ];
     final output = item['aggregatedOutput'] as String?;
-    final done = item['status'] == 'completed' || item['status'] == 'failed';
+    final done = switch (item['status']) {
+      'completed' || 'failed' || 'declined' || 'interrupted' => true,
+      _ => false,
+    };
     if (actions.isNotEmpty && actions.every((a) => a['type'] == 'read')) {
       final path = actions.first['path'] as String;
       return ToolCallItem(
@@ -464,7 +770,7 @@ class CodexKernel
       output: output ?? '',
       status: !done
           ? CommandStatus.running
-          : item['exitCode'] == 0
+          : item['status'] == 'completed' && item['exitCode'] == 0
           ? CommandStatus.succeeded
           : CommandStatus.failed,
       startedAt: _startedAt[item['id']],
@@ -480,13 +786,33 @@ class CodexKernel
     var oldLine = 1;
     var newLine = 1;
     final hunk = RegExp(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@');
-    for (final line in diff.split('\n')) {
+    var inHunk = false;
+    final diffLines = diff.split('\n');
+    final wholeFile = !diffLines.any(hunk.hasMatch);
+    for (var i = 0; i < diffLines.length; i++) {
+      final line = diffLines[i];
+      if (wholeFile && (kind == 'add' || kind == 'delete')) {
+        if (line.isEmpty && i == diffLines.length - 1) continue;
+        if (kind == 'add') {
+          lines.add(DiffLine(DiffLineType.added, newLine++, line));
+          added++;
+        } else {
+          lines.add(DiffLine(DiffLineType.removed, oldLine++, line));
+          removed++;
+        }
+        continue;
+      }
       if (hunk.firstMatch(line) case final match?) {
+        inHunk = true;
         oldLine = int.parse(match.group(1)!);
         newLine = int.parse(match.group(2)!);
         continue;
       }
-      if (line.isEmpty) continue;
+      if (line.isEmpty ||
+          !inHunk ||
+          (line[0] != '+' && line[0] != '-' && line[0] != ' ')) {
+        continue;
+      }
       final text = line.substring(1);
       switch (line[0]) {
         case '+':
@@ -527,6 +853,7 @@ class CodexKernel
 
   void _endTurn(String turn, {required bool interrupted}) {
     _turn = null;
+    _serverTurn = null;
     for (final id in [..._reasoning.keys]) {
       _itemCompleted({'type': 'reasoning', 'id': id});
     }

@@ -175,6 +175,8 @@ Future<void> main(List<String> arguments) async {
       'windows',
       '--release',
       if (channel) '--dart-define=BAOCODE_CHANNEL=true',
+      if (arguments.contains('--disable-upstream-updates'))
+        '--dart-define=BAOCODE_DISABLE_UPSTREAM_UPDATES=true',
       // Not --split-debug-info, which would also leave the app's stack
       // traces (errors.log) unnamed, as offsets.
       '--extra-gen-snapshot-options=--save-debugging-info='

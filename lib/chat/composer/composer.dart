@@ -808,7 +808,8 @@ class ChatComposerState extends State<ChatComposer>
     menu: (_trigger != null, _menuX, _menuKind, _matches, _highlighted),
     pool: _pool,
     canSend: _canSend,
-    polishable: ComposerPolishSetting.current() && _hasWords(),
+    polishable:
+        _supportsPolish && ComposerPolishSetting.current() && _hasWords(),
   );
 
   /// Whether the text has words to polish: read again only once it
@@ -1364,8 +1365,10 @@ class ChatComposerState extends State<ChatComposer>
   /// prompt (Enhance prompt), its tags, images, code and links kept as they
   /// are, the agent's last turn told to know what it answers; put in its place as one change (⌘Z takes it back), unless the
   /// text changed meanwhile. Why not, in a notification.
+  bool get _supportsPolish => widget.session.kernel.id != 'codex';
+
   Future<void> _polish() async {
-    if (_polishing) return;
+    if (_polishing || !_supportsPolish) return;
     final asked = _polishText();
     if (!asked.hasWords) return;
     final before = _controller.text;
@@ -1489,6 +1492,7 @@ class ChatComposerState extends State<ChatComposer>
       onSubmit(message);
       return;
     }
+    if (!widget.session.canSend) return;
     widget.session.send(
       message,
       editor: widget.openEditor,
@@ -1610,6 +1614,7 @@ class ChatComposerState extends State<ChatComposer>
       session.kernel,
       _showsStop,
       session.health.noModel,
+      session.canSend,
       session.context?.fraction,
       for (final choice in [
         session.kernelChoice,
@@ -1952,9 +1957,12 @@ class ChatComposerState extends State<ChatComposer>
                       const SizedBox(width: 2),
                     ],
                     // With none to pick, one to set up.
-                    if (model != null || session.health.noModel)
+                    if (model != null ||
+                        session.health.noModel ||
+                        kernel != null)
                       SessionModelPicker(
                         session: session,
+                        allowKernelSwitch: widget.onSubmit == null,
                         pickerKey: _modelPickerKey,
                         tooltip: _hovers.model,
                         tapRegionGroupId: widget.tapRegionGroupId,
@@ -1966,7 +1974,7 @@ class ChatComposerState extends State<ChatComposer>
             ),
           ),
           const SizedBox(width: 8),
-          if (ComposerPolishSetting.current()) ...[
+          if (_supportsPolish && ComposerPolishSetting.current()) ...[
             _PolishButton(
               busy: _polishing,
               enabled: _polishing || _shownBuilt!.polishable,
@@ -1990,7 +1998,7 @@ class ChatComposerState extends State<ChatComposer>
           const SizedBox(width: 2),
           _SendButton(
             streaming: _showsStop,
-            enabled: _canSend,
+            enabled: _canSend && (widget.onSubmit != null || session.canSend),
             onSend: _submit,
             onStop: () => stopTurn(this.context, session),
           ),

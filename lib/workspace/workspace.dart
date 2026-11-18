@@ -3616,12 +3616,21 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
 
   /// A new, empty agent in [project], listed here but not shown.
   AgentThread _newThread(Project project) {
-    final kernel =
+    final requestedKernel =
         switch (agentSetup?.call(project.path)?.kernel) {
           final id? => kernels.where((k) => k.id == id).firstOrNull,
           null => null,
         } ??
+        kernels
+            .where((k) => k.id == KernelRegistry.configuredDefault())
+            .firstOrNull ??
         _preferredKernel;
+    final kernel =
+        project.host != null && requestedKernel.id == KernelRegistry.codex.id
+        ? kernels.firstWhere(
+            (entry) => entry.id == KernelRegistry.claudeCode.id,
+          )
+        : requestedKernel;
     final settings = _setUp(project.path, {
       ..._preferredSettings,
       // Settings → Models' pick, if any, over the last one.
@@ -3986,7 +3995,11 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       session.rename(title);
       return;
     }
-    if (titler == null || !session.canRename) return;
+    if (titler == null ||
+        !session.canRename ||
+        session.kernel.id == KernelRegistry.codex.id) {
+      return;
+    }
     final model = session.selected(KernelChoiceKind.model);
     unawaited(
       _idOf(thread)

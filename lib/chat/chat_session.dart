@@ -364,7 +364,12 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
 
   /// Null once locked, or with nothing to choose from.
   KernelChoice? get kernelChoice {
-    if (kernelLocked || kernels.length < 2) return null;
+    if (kernelLocked ||
+        kernels.length < 2 ||
+        (kernelContext.cwd != null &&
+            RemoteLocation.isRemote(kernelContext.cwd!))) {
+      return null;
+    }
     return KernelChoice(
       options: _kernelOptions,
       selected: _kernelOptions[kernels.indexOf(kernel)],
@@ -374,7 +379,7 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
   }
 
   void setKernel(KernelDescriptor descriptor) {
-    if (kernelLocked || descriptor.id == kernel.id) return;
+    if (kernelChoice == null || descriptor.id == kernel.id) return;
     unawaited(_subscription?.cancel());
     _kernel.dispose();
     _transcript = Transcript(
@@ -382,6 +387,7 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
       queuedInPlace: _queuedInPlace,
     );
     _connect(descriptor);
+    _kernel.prepare();
     notifyListeners();
   }
 
@@ -646,7 +652,10 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
   bool get isUnprompted => _transcript.activeTurnUnprompted;
 
   /// Whether the composer may send now.
-  bool get canSend => !isStreaming || canQueue;
+  // Keep unsent text if a local Codex process could not start or has exited.
+  bool get canSend =>
+      !(kernel.id == 'codex' && health.status == KernelHealthStatus.failed) &&
+      (!isStreaming || canQueue);
 
   InteractionRequest? get pendingInteraction => _transcript.pendingInteraction;
 

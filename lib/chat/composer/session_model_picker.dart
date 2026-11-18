@@ -32,9 +32,11 @@ class SessionModelPicker extends StatelessWidget {
     this.tooltip,
     this.tapRegionGroupId,
     this.focusNode,
+    this.allowKernelSwitch = true,
   });
 
   final ChatSession session;
+  final bool allowKernelSwitch;
 
   /// The picker's own, to open it from a keybinding.
   final GlobalKey<ComposerPickerState>? pickerKey;
@@ -154,7 +156,37 @@ class SessionModelPicker extends StatelessWidget {
   Widget _build(BuildContext context) {
     final model = session.models;
     final l10n = context.l10n;
+    final backend = allowKernelSwitch ? session.kernelChoice : null;
+    final alternatives = [
+      if (backend != null)
+        for (final option in backend.options)
+          if (option.id != backend.selected.id)
+            (
+              label: option.label,
+              icon: option.icon,
+              onTap: () => backend.onSelected(option),
+            ),
+    ];
     if (model == null) {
+      if (alternatives.isNotEmpty && backend != null) {
+        return ComposerPicker(
+          key: pickerKey,
+          options: backend.options,
+          selected: backend.selected,
+          onSelected: backend.onSelected,
+          tooltip: tooltip,
+          tapRegionGroupId: tapRegionGroupId,
+          focusNode: focusNode,
+          footers: [
+            if (session.health.noModel)
+              (
+                label: l10n.modelSetUp,
+                icon: Icons.tune_rounded,
+                onTap: () => unawaited(showModelWelcome(context)),
+              ),
+          ],
+        );
+      }
       if (!session.health.noModel) return const SizedBox.shrink();
       return _SetUpPill(
         label: l10n.modelSetUp,
@@ -194,6 +226,7 @@ class SessionModelPicker extends StatelessWidget {
       menuWidth: 260,
       searchPlaceholder: l10n.modelsSearch,
       footers: [
+        ...alternatives,
         if (fallback != null)
           (
             label: l10n.modelsFallbackSwitchBack(picked),

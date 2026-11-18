@@ -1,0 +1,56 @@
+name: BaoCode Codex Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex-app-server-windows]
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.5
+  BAOCODE_REMOTE_VERSION: 2.0.2.35-d0c299e2b113
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - uses: ./.github/actions/setup-rust
+      - name: Resolve Dart packages
+        run: flutter pub get
+      - name: Test Codex adapter
+        run: flutter test test/kernel_test.dart --plain-name "Codex adapter"
+      - name: Test Codex history catalog
+        run: flutter test test/codex_catalog_test.dart
+      - name: Test switching to Codex in the model picker
+        run: flutter test test/kernel_ui_test.dart --plain-name "the model picker switches a fresh chat to Codex"
+      - name: Build Windows installer
+        run: dart run tool/build_windows.dart --arch x64 --remote-release $env:BAOCODE_REMOTE_VERSION --disable-upstream-updates
+      - name: Stage installer and SHA-256
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
+          if ($files.Count -ne 1) {
+            throw "Expected one x64 BaoCode installer; found $($files.Count)"
+          }
+          $out = New-Item -ItemType Directory -Path build/codex-windows-artifact -Force
+          $name = $files[0].Name -replace '-setup\.exe$', '-codex-x64-setup.exe'
+          $target = Join-Path $out.FullName $name
+          Copy-Item -LiteralPath $files[0].FullName -Destination $target
+          $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Path "$target.sha256" -Encoding ascii
+      - uses: actions/upload-artifact@v6
+        with:
+          name: baocode-codex-windows-x64-installer
+          path: build/codex-windows-artifact/
+          if-no-files-found: error
+          retention-days: 14

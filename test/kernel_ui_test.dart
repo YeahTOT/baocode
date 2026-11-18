@@ -451,6 +451,36 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  testWidgets('the model picker switches a fresh chat to Codex', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final workspace = Workspace.mock();
+    await tester.pumpWidget(BaoCodeApp(workspace: workspace));
+    await tester.pump();
+    await tester.tap(
+      find.descendant(
+        of: find.byType(Sidebar),
+        matching: find.text('New Chat'),
+      ),
+    );
+    await tester.pump();
+
+    final model = find.descendant(
+      of: find.byType(SessionModelPicker),
+      matching: picker('Auto'),
+    );
+    await tester.tap(model);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Codex'), findsOneWidget);
+    await tester.tap(find.text('Codex'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(workspace.selected.kernel, MockKernels.codex);
+    expect(picker('GPT-5.5 Codex'), findsOneWidget);
+  });
+
   testWidgets('a Codex agent asks leave, and has no undo or tasks', (
     tester,
   ) async {

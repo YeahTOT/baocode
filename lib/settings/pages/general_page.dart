@@ -12,6 +12,7 @@ import '../../ide/ide_notifications.dart' show IdeSeverity;
 import '../../kernel/claude_code/claude_core_setting.dart';
 import '../../kernel/claude_code/claude_path_setting.dart';
 import '../../kernel/commit_attribution.dart';
+import '../../kernel/kernel_registry.dart';
 import '../../kernel/prompt_suggestions.dart';
 import '../../chat/composer/composer_polish.dart' show ComposerPolishSetting;
 import '../../chat/rewind_files_setting.dart';
@@ -418,6 +419,40 @@ class GeneralSettingsPage extends StatelessWidget {
                 ),
               ],
             ),
+            if (KernelRegistry.all.length > 1)
+              SettingsGroup(
+                title: Localizations.localeOf(context).languageCode == 'zh'
+                    ? '编码代理'
+                    : 'Coding agent',
+                children: [
+                  SettingsCard(
+                    children: [
+                      _choiceRow(
+                        context,
+                        key: KernelRegistry.defaultSettingKey,
+                        label:
+                            Localizations.localeOf(context).languageCode == 'zh'
+                            ? '新会话的默认代理'
+                            : 'Default agent for new chats',
+                        description:
+                            Localizations.localeOf(context).languageCode == 'zh'
+                            ? '不会切换已开始的聊天。'
+                            : 'Does not switch existing conversations.',
+                        values: {
+                          'auto':
+                              Localizations.localeOf(context).languageCode ==
+                                  'zh'
+                              ? '沿用上次选择'
+                              : 'Use last selection',
+                          for (final backend in KernelRegistry.all)
+                            backend.id: backend.label,
+                        },
+                        fallback: 'auto',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             if (claudeStatus case final claudeStatus? when !kIsWeb)
               SettingsGroup(
                 title: 'Claude Code',

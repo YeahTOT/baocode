@@ -64,6 +64,7 @@ import 'kernel/claude_code/turn_stats_stub.dart'
     show turnStatsIn;
 import 'kernel/commit_attribution.dart';
 import 'kernel/extension_switches.dart';
+import 'kernel/kernel_registry.dart';
 import 'kernel/prompt_suggestions.dart';
 import 'workspace/session_tools.dart';
 import 'chat/composer/composer_polish.dart' show ComposerPolishSetting;
@@ -566,6 +567,10 @@ void followSettingsFiles(SettingsFiles files) {
   ClaudeCore.current = () =>
       ClaudeCore.parse(files.settings[ClaudeCore.settingKey]);
   ClaudeCore.changes = files.settings;
+  KernelRegistry.configuredDefault = () {
+    final selected = files.settings[KernelRegistry.defaultSettingKey];
+    return selected is String ? selected : null;
+  };
   // Settings → Models: the upstreams, kept in settings.json.
   ModelProviders.current = ModelProviders.settings(files.settings);
   // The upstream that follows magpie: its models got again as it starts,
@@ -678,6 +683,9 @@ void followSettingsFiles(SettingsFiles files) {
 /// `update.mode` says, from baocode.dev, installed as the app quits. None
 /// where the build does not update itself.
 UpdateController? _startUpdates(SettingsFiles files) {
+  if (const bool.fromEnvironment('BAOCODE_DISABLE_UPSTREAM_UPDATES')) {
+    return null;
+  }
   final platform = platformUpdates(
     updatesDirectory: DataDirectory.current.updatesDir,
   );

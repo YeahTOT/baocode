@@ -7459,6 +7459,7 @@ exec /usr/bin/env "\$@"
       await pumpEventQueue();
       expect(server.written.map((m) => m['method']), [
         'initialize',
+        'initialized',
         'thread/start',
         'turn/start',
       ]);
@@ -7564,6 +7565,11 @@ exec /usr/bin/env "\$@"
       expect((running as TerminalItem).status, CommandStatus.running);
 
       kernel.cancel();
+      await pumpEventQueue();
+      expect(server.written.last['method'], 'turn/interrupt');
+      notify('turn/completed', {
+        'turn': {'id': 'st1', 'status': 'interrupted'},
+      });
       final stopped = events
           .whereType<ItemUpserted>()
           .lastWhere((e) => e.id == 'c1')
@@ -7571,6 +7577,67 @@ exec /usr/bin/env "\$@"
       expect((stopped as TerminalItem).status, CommandStatus.failed);
       expect(stopped.command, 'sleep 9');
       expect(events.last, isA<TurnEnded>());
+    });
+
+    test(
+      'live adapter loads models, works in cwd and resumes a thread',
+      () async {
+        kernel.dispose();
+        const cwd = '/my/project';
+        kernel = CodexKernel(
+          MockKernels.codex,
+          server = _FakeServer(),
+          context: KernelContext(
+            cwd: cwd,
+            resume: SessionRecord(
+              id: 'existing',
+              title: 'Resume me',
+              updatedAt: DateTime(2026),
+              cwd: cwd,
+            ),
+          ),
+          restartTransport: _FakeServer.new,
+        );
+        kernel.events.listen(events.add);
+        kernel.prepare();
+        await pumpEventQueue();
+        expect(kernel.model.selected, 'a-real-model');
+        expect(kernel.health.status, KernelHealthStatus.ready);
+        expect(kernel.sessionId, 'existing');
+        expect(events.whereType<HistoryPrepended>(), hasLength(1));
+        kernel.send(const KernelTurn(id: 'with-cwd', text: 'hello'));
+        await pumpEventQueue();
+        expect(server.written.map((m) => m['method']), [
+          'initialize',
+          'initialized',
+          'model/list',
+          'thread/resume',
+          'turn/start',
+        ]);
+        final params = server.written.last['params'] as Map;
+        expect(params['threadId'], 'existing');
+        expect(params['cwd'], cwd);
+        expect(params['model'], 'a-real-model');
+      },
+    );
+
+    test('shows an RPC turn error and permits a subsequent prompt', () async {
+      server.rejectNextTurn = true;
+      kernel.send(const KernelTurn(id: 'first', text: 'hi'));
+      await pumpEventQueue();
+      final notice = events
+          .whereType<ItemUpserted>()
+          .map((item) => item.item)
+          .whereType<NoticeItem>()
+          .single;
+      expect(notice.text, contains('Test turn error'));
+      expect(events.whereType<TurnEnded>().last.interrupted, isTrue);
+      kernel.send(const KernelTurn(id: 'second', text: 'retry'));
+      await pumpEventQueue();
+      expect(
+        server.written.where((message) => message['method'] == 'turn/start'),
+        hasLength(2),
+      );
     });
 
     test('declares no background tasks and no undo', () {
@@ -7586,6 +7653,7 @@ class _FakeServer implements CodexTransport {
   final StreamController<Map<String, Object?>> _out =
       StreamController.broadcast(sync: true);
   final List<Map<String, Object?>> written = [];
+  bool rejectNextTurn = false;
 
   @override
   Stream<Map<String, Object?>> get messages => _out.stream;
@@ -7595,14 +7663,44 @@ class _FakeServer implements CodexTransport {
   @override
   void write(Map<String, Object?> message) {
     written.add(message);
+    if (message['method'] == 'turn/start' && rejectNextTurn) {
+      rejectNextTurn = false;
+      push({
+        'id': message['id'],
+        'error': {'code': -32000, 'message': 'Test turn error'},
+      });
+      return;
+    }
     final result = switch (message['method']) {
+      'model/list' => {
+        'data': [
+          {
+            'id': 'a-real-model',
+            'displayName': 'Real model',
+            'description': 'A model reported by the server',
+            'isDefault': true,
+          },
+        ],
+      },
+      'thread/resume' => {
+        'thread': {
+          'id': 'existing',
+          'turns': [
+            {
+              'items': [
+                {'id': 'reply', 'type': 'agentMessage', 'text': 'hello'},
+              ],
+            },
+          ],
+        },
+      },
       'thread/start' => {
         'thread': {'id': 'th'},
       },
       'turn/start' => {
         'turn': {'id': 'st1'},
       },
-      null => null,
+      null || 'initialized' => null,
       _ => <String, Object?>{},
     };
     if (result != null) push({'id': message['id'], 'result': result});

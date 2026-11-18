@@ -10,3 +10,8 @@ abstract interface class CodexTransport {
 
   void close();
 }
+
+/// A transport backed by a process that can be awaited during disposal.
+abstract interface class ManagedCodexTransport implements CodexTransport {
+  Future<void> get stopped;
+}
