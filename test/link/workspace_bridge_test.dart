@@ -21,6 +21,7 @@ import 'package:baocode/link/workspace_bridge.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
 import '../kernel_test.dart' show FakeCli;
 
@@ -881,13 +882,14 @@ void main() {
     addTearDown(bots.dispose);
     final (_, desktop) = await peers();
     final uploads = Directory.systemTemp.createTempSync('phone_uploads');
+    final uploadRoot = p.join(uploads.path, 'phone');
     addTearDown(() => uploads.deleteSync(recursive: true));
     final withBots = WorkspaceBridge(
       workspace: workspace,
       peer: desktop,
       device: () => const DeviceInfo(name: 'PC', kind: 'pc', system: 'Win'),
       bots: bots,
-      uploadsOf: (_, _) => '${uploads.path}/phone',
+      uploadsOf: (_, _) => uploadRoot,
     );
     addTearDown(withBots.dispose);
     final bytes = [80, 75, 3, 4, 0, 1, 2];
@@ -896,8 +898,8 @@ void main() {
       {'bot': 'assistant', 'name': name, 'data': base64.encode(bytes)},
     ) as Map;
     final first = (await upload('报价单.xlsx'))['path'] as String;
-    expect(first, startsWith('${uploads.path}/phone/'));
-    expect(first, endsWith('/报价单.xlsx'));
+    expect(p.dirname(p.dirname(first)), uploadRoot);
+    expect(p.basename(first), '报价单.xlsx');
     expect(File(first).readAsBytesSync(), bytes);
     // The same name again: a folder of its own, the first one kept.
     final second = (await upload('报价单.xlsx'))['path'] as String;
