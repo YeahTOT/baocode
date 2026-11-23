@@ -121,9 +121,16 @@ void main() {
   }
 
   Future<RemoteClient> open({Duration? grace}) async {
+    final ssh = launcher(grace: grace);
     host = SshHost(
       '$address:${proxy.port}',
-      connect: launcher(grace: grace).connect,
+      // With the published fixture, the launcher downloads and validates
+      // the exact daemon shipped by the Windows installer. Flutter's test
+      // HTTP override otherwise returns a synthetic 400 before SSH starts.
+      connect: (target, {onProgress}) => HttpOverrides.runWithHttpOverrides(
+        () => ssh.connect(target, onProgress: onProgress),
+        _SshFixtureHttpOverrides(),
+      ),
     );
     watching = host.reconnected.listen(reconnected.add);
     final client = await host.ready;
@@ -446,3 +453,5 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"com
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
 while IFS= read -r ignored; do :; done
 ''';
+
+class _SshFixtureHttpOverrides extends HttpOverrides {}
