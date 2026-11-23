@@ -34,6 +34,17 @@ jobs:
         run: flutter pub get
       - name: Test Antigravity kernel and runtime
         run: flutter test test/kernel/antigravity_kernel_test.dart test/kernel/agy_runtime_test.dart
+      - name: Keep the preview off the official update channel
+        shell: pwsh
+        run: |
+          $path = 'lib/main.dart'
+          $source = [IO.File]::ReadAllText($path)
+          $marker = 'UpdateController? _startUpdates(SettingsFiles files) {'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'Unexpected update entry point' }
+          $source = $source.Replace($marker, "$marker`n  return null; /* Preview: the upstream channel does not carry ACP. */")
+          $source = $source.Replace('  return null; /* Preview: the upstream channel does not carry ACP. */', '  if (const bool.fromEnvironment("dart.vm.product")) return null;')
+          [IO.File]::WriteAllText($path, $source)
+          git diff --check
       - name: Build Windows x64 installer
         run: dart run tool/build_windows.dart --arch x64 --remote-release 2.0.4.37-8c3ababc505d
       - name: Verify installer and write SHA-256
