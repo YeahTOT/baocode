@@ -105,10 +105,16 @@ abstract interface class AgyRuntime {
 
 /// `agy` could not be run: not installed, too old, or failing to start.
 class AgyUnavailable implements Exception {
-  const AgyUnavailable(this.message, {this.notInstalled = false, this.detail});
+  const AgyUnavailable(
+    this.message, {
+    this.notInstalled = false,
+    this.unsupportedHost = false,
+    this.detail,
+  });
 
   final String message;
   final bool notInstalled;
+  final bool unsupportedHost;
   final String? detail;
 
   @override

@@ -10,6 +10,7 @@
 #   sh tool/ssh_e2e.sh --up     start them only (for another machine to
 #                               run the tests: BAOCODE_SSH_E2E_BIND=0.0.0.0
 #                               to listen on the network, not this one only)
+#   sh tool/ssh_e2e.sh --containers-only  start without compiling the server
 #   sh tool/ssh_e2e.sh --down   remove them
 set -eu
 cd "$(dirname "$0")/.."
@@ -62,6 +63,7 @@ run --name bao-e2e-bastion -p $bind:2223:22 -e SSH_USER=ops -e SSH_PASSWORD=bast
 run --name bao-e2e-inner --network-alias inner -e SSH_USER=tester -e SSH_KEY="$key"
 run --name bao-e2e-flaky --cap-add NET_ADMIN -p $bind:2224:22 -e SSH_USER=tester -e SSH_KEY="$key"
 
+[ "${1:-}" = --containers-only ] && exit 0
 dart run tool/build_remote_server.dart --out "$work/remote"
 [ "${1:-}" = --up ] && exit 0
 BAOCODE_SSH_E2E="$work" BAOCODE_REMOTE_SERVER_DIR="$work/remote" \

@@ -33,6 +33,8 @@ abstract final class LinkMethods {
   /// phone's first item is, and leaves out those it has as they are: its
   /// `start` is how many. [LinkPeer] sends it, and makes the update whole
   /// again, by itself ([LinkSessionMirror]).
+  /// New clients can opt in with `"kernelChoices": true`. An unsent
+  /// non-bot draft then offers the available kernels through [choose].
   static const open = 'open';
 
   /// `{"session", "count"?}` -> `{"items": [...], "earlier"}`: up to

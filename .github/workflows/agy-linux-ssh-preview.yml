@@ -1,0 +1,106 @@
+name: BaoCode Antigravity ACP Linux SSH Preview
+on:
+  push:
+    branches: [preview/agy-acp-linux-ssh]
+  workflow_dispatch:
+    inputs:
+      editions:
+        description: 'The isolated preview always builds Windows x64 only'
+        required: false
+        type: string
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: b9b32dd1fd6b8f1379f06b9e7614ff5b25c16683
+  REMOTE_RELEASE: 2.0.4.37-8c3ababc505d
+jobs:
+  linux-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+      - uses: ./.github/actions/setup-rust
+      - run: flutter pub get
+      - name: Test remote ACP and the paired-phone bridge
+        run: flutter test test/kernel/agy_runtime_remote_test.dart test/kernel/antigravity_catalog_test.dart test/link/antigravity_ssh_phone_test.dart
+      - name: Fetch the remote daemon shipped by the installer
+        run: dart run tool/fetch_remote_server.dart "$REMOTE_RELEASE" --out "${{ runner.temp }}/agy-shipped-remote"
+      - name: Start disposable Linux SSH fixture
+        env:
+          BAOCODE_SSH_E2E: ${{ runner.temp }}/baocode-ssh-e2e
+        run: sh tool/ssh_e2e.sh --containers-only
+      - name: Break and resume an active ACP stream over real SSH
+        env:
+          BAOCODE_SSH_E2E: ${{ runner.temp }}/baocode-ssh-e2e
+          BAOCODE_REMOTE_SERVER_DIR: ${{ runner.temp }}/agy-shipped-remote
+        run: flutter test test/remote/ssh_resilience_e2e_test.dart --run-skipped -t ssh-e2e --plain-name 'Antigravity ACP streams across an SSH cut'
+      - name: Clean up SSH fixture
+        if: always()
+        run: sh tool/ssh_e2e.sh --down
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify SSH ACP preview source
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:SOURCE_SHA HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Wrong source base' }
+          if (!(Test-Path lib/kernel/antigravity/agy_runtime_remote.dart)) { throw 'SSH ACP runtime missing' }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+      - uses: ./.github/actions/setup-rust
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Resolve dependencies
+        run: flutter pub get
+      - name: Test Antigravity kernel and runtime
+        run: flutter test test/kernel/antigravity_kernel_test.dart test/kernel/agy_runtime_test.dart test/kernel/agy_runtime_remote_test.dart test/kernel/antigravity_catalog_test.dart test/link/workspace_bridge_test.dart test/link/antigravity_ssh_phone_test.dart
+      - name: Keep the preview off the official update channel
+        shell: pwsh
+        run: |
+          $path = 'lib/main.dart'
+          $source = [IO.File]::ReadAllText($path)
+          $marker = 'UpdateController? _startUpdates(SettingsFiles files) {'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'Unexpected update entry point' }
+          $guard = '  if (const bool.fromEnvironment("dart.vm.product")) return null;'
+          $source = $source.Replace($marker, $marker + [Environment]::NewLine + $guard)
+          [IO.File]::WriteAllText($path, $source)
+          git diff --check
+      - name: Build Windows x64 installer
+        run: dart run tool/build_windows.dart --arch x64 --remote-release $env:REMOTE_RELEASE
+      - name: Verify installer and write SHA-256
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
+          if ($files.Count -ne 1) { throw "Expected one installer, got $($files.Count)" }
+          $out = New-Item -ItemType Directory -Path build/agy-acp-artifact -Force
+          $name = 'BaoCode-2.0.4-agy-acp-linux-ssh-preview-windows-x64-setup.exe'
+          $target = Join-Path $out.FullName $name
+          Copy-Item -LiteralPath $files[0].FullName -Destination $target
+          $stream = [IO.File]::OpenRead($target)
+          try {
+            if ($stream.Length -lt 1MB -or $stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw 'Invalid Windows installer' }
+          } finally { $stream.Dispose() }
+          $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -LiteralPath "$target.sha256" -Encoding ascii
+          @("Upstream source: $env:SOURCE_SHA", "Preview commit: $env:GITHUB_SHA") | Set-Content -LiteralPath (Join-Path $out.FullName "SOURCE.txt") -Encoding ascii
+          "$hash  $name" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+      - uses: actions/upload-artifact@v6
+        with:
+          name: baocode-agy-acp-linux-ssh-preview-windows-x64
+          path: build/agy-acp-artifact/
+          if-no-files-found: error
+          retention-days: 14

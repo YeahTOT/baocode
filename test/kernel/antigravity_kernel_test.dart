@@ -1244,10 +1244,55 @@ void main() {
     expect(kernel.health.status, KernelHealthStatus.ready);
   });
 
-  test('a remote project is not one it works in', () async {
+  test('SSH projects send a POSIX cwd and keep a scoped session id', () async {
     kernel = make(cwd: 'ssh://box/home/me/app');
     await started();
-    expect(kernel.health.setup?.kind, KernelSetupKind.localOnly);
+    kernel.send(const KernelTurn(id: 't1', text: 'go'));
+    await pumpEventQueue();
+    expect(runtime.agent.sentOf('session/new').single['cwd'], '/home/me/app');
+    expect(runtime.agent.sentOf('session/prompt').single['sessionId'], 's1');
+    expect(kernel.sessionId, 'agy-ssh:box:s1');
+  });
+
+  test('SSH ACP relays approval and cancel using the raw session ID', () async {
+    kernel = make(cwd: 'ssh://box/home/me/app');
+    await started();
+    kernel.send(const KernelTurn(id: 't1', text: 'go'));
+    await pumpEventQueue();
+    runtime.agent.ask('p1', 'session/request_permission', {
+      'sessionId': 's1',
+      'toolCall': {'toolCallId': 'c1', 'title': 'Run tests'},
+      'options': [
+        {'optionId': 'yes', 'name': 'Allow', 'kind': 'allow_once'},
+        {'optionId': 'no', 'name': 'Reject', 'kind': 'reject_once'},
+      ],
+    });
+    await pumpEventQueue();
+    final request = of<InteractionRequested>().single.request;
+    kernel.answer(request.id, const ApprovalAnswer(ApprovalDecision.allowOnce));
+    await pumpEventQueue();
+    expect(runtime.agent.replies['p1']!['result'], {
+      'outcome': {'outcome': 'selected', 'optionId': 'yes'},
+    });
+    kernel.cancel();
+    expect(runtime.agent.sentOf('session/cancel').single, {'sessionId': 's1'});
+    expect(of<TurnEnded>().single.interrupted, isTrue);
+    runtime.agent.answer('session/prompt', {'stopReason': 'cancelled'});
+    await pumpEventQueue();
+  });
+
+  test('an SSH history record from another host is refused', () async {
+    kernel = make(
+      cwd: 'ssh://box/home/me/app',
+      resume: SessionRecord(
+        id: 'agy-ssh:other:s1',
+        title: 'different host',
+        updatedAt: DateTime(2026),
+        cwd: 'ssh://other/home/me/app',
+      ),
+    );
+    await started();
+    expect(kernel.health.status, KernelHealthStatus.failed);
     expect(runtime.agents, isEmpty);
   });
 

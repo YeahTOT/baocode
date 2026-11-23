@@ -14,6 +14,8 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:bao_remote/client.dart';
+import 'package:baocode/kernel/acp/acp_connection.dart';
+import 'package:baocode/kernel/antigravity/agy_runtime_remote.dart';
 import 'package:baocode/remote/remote_binaries.dart';
 import 'package:baocode/remote/ssh_host.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -189,6 +191,55 @@ void main() {
     expect(proxy.accepted, greaterThanOrEqualTo(5));
     expect(await daemons(), 1);
   }, timeout: timeout);
+
+  test(
+    'Antigravity ACP streams across an SSH cut without a second prompt',
+    () async {
+      final client = await open();
+      final home = client.hello!.home;
+      final target = p.posix.join(home, '.local', 'bin', 'agy');
+      // This host is the disposable test container, never a real login.
+      final installed = await client.run('sh', [
+        '-c',
+        'mkdir -p "\$HOME/.local/bin" && cat > "\$1" && chmod 700 "\$1"',
+        'install-fixture',
+        target,
+      ], stdin: _agyFixture);
+      expect(installed.exitCode, 0, reason: installed.stderr);
+      addTearDown(() async {
+        await client.run('rm', ['-f', target]);
+      });
+      final runtime = RemoteAgyRuntime(host.host, ready: () async => client);
+      final transport = await runtime.start(home);
+      addTearDown(runtime.stopAll);
+      final chunks = <String>[];
+      final connection = AcpConnection(
+        transport,
+        onRequest: (_, _) async => null,
+        onNotification: (_, params) => chunks.add(params['chunk']! as String),
+      );
+      expect((await connection.request('initialize'))['protocolVersion'], 1);
+      final result = connection.request('session/prompt', {
+        'sessionId': 'fake',
+      });
+      await until(() => chunks.contains('before'));
+      proxy.refusing = true;
+      proxy.cut();
+      await until(() => host.state != SshHostState.connected);
+      // Both notifications and the response are generated during the outage.
+      await Future<void>.delayed(const Duration(seconds: 2));
+      proxy.restore();
+      await until(() => host.state == SshHostState.connected);
+      expect(await result.timeout(const Duration(seconds: 20)), {
+        'stopReason': 'end_turn',
+      });
+      expect(chunks, ['before', 'during', 'complete']);
+      expect(host.client, same(client));
+      expect(reconnected, isEmpty);
+      connection.close();
+    },
+    timeout: timeout,
+  );
 
   test('a network gone silent (nothing sent, nothing reset) is noticed, '
       'and what was asked meanwhile answered once it is back', () async {
@@ -381,3 +432,17 @@ void main() {
     expect(sockets, '0');
   }, timeout: timeout);
 }
+
+// Static JSON lines use the first two request IDs of the test connection.
+const _agyFixture = r'''#!/bin/sh
+[ "$1" = acp ] || exit 1
+IFS= read -r init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+IFS= read -r prompt
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"before"}}'
+sleep 1
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"during"}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"complete"}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+while IFS= read -r ignored; do :; done
+''';

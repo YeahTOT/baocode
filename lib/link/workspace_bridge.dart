@@ -546,6 +546,9 @@ class WorkspaceBridge {
           peer: peer,
           throttle: throttle,
           window: params['window'] as int?,
+          kernelChoices:
+              params['kernelChoices'] == true &&
+              bots?.botAt(thread.project.path) == null,
           pathOf: (full) => _phonePath(thread.project, full),
           sessionOf: _phoneSession,
           quota: quota,
@@ -654,7 +657,8 @@ class WorkspaceBridge {
         final bot = bots?.botAt(thread.project.path);
         // A bot's agent asks nothing and works as one: only its model,
         // and how it thinks, are the user's to pick.
-        if (bot != null && (kind == 'mode' || kind == 'permission')) {
+        if (bot != null &&
+            (kind == 'kernel' || kind == 'mode' || kind == 'permission')) {
           throw const LinkRemoteException(
             LinkErrors.unsupported,
             'A bot works as it does',
@@ -1431,6 +1435,7 @@ class WorkspaceBridge {
 
   static void _choose(ChatSession session, String kind, String id) {
     final KernelChoice? choice = switch (kind) {
+      'kernel' => session.kernelChoice,
       'model' => session.models,
       'mode' => session.modes,
       'permission' => session.permissions,
@@ -1462,6 +1467,7 @@ class _Follow {
     required this.pathOf,
     required this.sessionOf,
     this.window,
+    this.kernelChoices = false,
     this.quota,
   });
 
@@ -1479,8 +1485,11 @@ class _Follow {
     pathOf: pathOf,
     sessionOf: sessionOf,
     window: window,
+    kernelChoices: kernelChoices,
     quota: quota,
   );
+
+  final bool kernelChoices;
 
   /// How many of the last items the phone follows at first, if it pages
   /// back through the rest (see [earlier]); null for all of them.
@@ -1803,6 +1812,7 @@ class _Follow {
     };
     final model = session.models;
     return [
+      if (kernelChoices) ?of('kernel', session.kernelChoice),
       ?of('model', model),
       ?of('mode', session.modes),
       ?of('permission', session.permissions),

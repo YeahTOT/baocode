@@ -15,6 +15,8 @@ import '../kernel_event.dart';
 import '../kernel_types.dart';
 import '../output_meter.dart';
 import 'agy_runtime.dart';
+import 'agy_runtime_remote.dart';
+import 'agy_ssh_location.dart';
 import 'antigravity_catalog.dart';
 import 'antigravity_translator.dart';
 import '../line_diff.dart';
@@ -49,9 +51,9 @@ class AntigravityKernel
     this._quiet = const Duration(seconds: 4),
     this._pollEvery = const Duration(seconds: 3),
     this._idleFor = const Duration(minutes: 2),
-  }) : _runtime = runtime ?? AgyRuntime.local {
+  }) : _runtime = runtime ?? agyRuntimeFor(_context.cwd) {
     _restore();
-    _models = _lastModels;
+    _models = _kept.lastModels;
     final settings = _context.settings;
     _work = _pick(settings[KernelChoiceKind.mode.name], _works, 'agent');
     _approval = _pick(
@@ -73,10 +75,21 @@ class AntigravityKernel
       fileText: _runtime.fileText,
     )..onTasksChanged = _tasksChanged;
     if (_context.resume case final resume?) {
-      _sessionId = resume.id;
-      _prompted = true;
-      _loadingHistory = true;
-      unawaited(_read());
+      final key = parseAgySessionKey(resume.id);
+      final host = _host;
+      if (host != RemoteLocation.hostOf(resume.cwd) ||
+          (host == null ? isAgySshSessionKey(resume.id) : key?.host != host)) {
+        _invalidResume = true;
+        _health = const KernelHealth(
+          KernelHealthStatus.failed,
+          message: 'This Antigravity session belongs to another project host',
+        );
+      } else {
+        _sessionId = key?.id ?? resume.id;
+        _prompted = true;
+        _loadingHistory = true;
+        unawaited(_read());
+      }
     }
   }
 
@@ -87,6 +100,8 @@ class AntigravityKernel
   late final AntigravityTranslator _translator;
 
   String? get _cwd => _context.cwd;
+  String? get _host => RemoteLocation.hostOf(_cwd ?? '');
+  bool _invalidResume = false;
   KernelWorkspace? get _workspace => _context.workspace?.call();
 
   // --- Health ------------------------------------------------------------------------
@@ -119,6 +134,7 @@ class AntigravityKernel
 
   /// The app's own tools, served to it.
   McpEndpoint? _tools;
+  McpEndpoint? get _toolEndpoint => _host == null ? _tools : _run?.tools;
 
   String? _sessionId;
 
@@ -126,23 +142,16 @@ class AntigravityKernel
   bool _prompted = false;
 
   @override
-  String? get sessionId => _prompted ? _sessionId : null;
+  String? get sessionId => _prompted && _sessionId != null
+      ? agySessionKey(_host, _sessionId!)
+      : null;
 
   /// A view shows the conversation: an agy is booted ahead for its next
   /// message, the account's limits asked if old; the conversation is read
   /// if that failed before.
   @override
   void prepare() {
-    if (_cwd case final cwd? when RemoteLocation.hostOf(cwd) != null) {
-      _setHealth(
-        const KernelHealth(
-          KernelHealthStatus.failed,
-          setup: KernelSetup(KernelSetupKind.localOnly),
-        ),
-      );
-      _historyRead();
-      return;
-    }
+    if (_invalidResume) return;
     _runtime.warm();
     _limitsAfterTurn();
     if (_readFailed) {
@@ -157,7 +166,17 @@ class AntigravityKernel
   /// A new conversation asks agy nothing till its first message: told now
   /// where there is none to ask.
   Future<void> _checkInstalled() async {
-    if (await _runtime.locate() != null || _disposed) return;
+    try {
+      if (await _runtime.locate() != null || _disposed) return;
+    } on Object catch (error) {
+      if (_disposed || _health.status != KernelHealthStatus.ready) return;
+      if (error is AgyUnavailable) {
+        _fail(error.message, detail: error.detail);
+      } else {
+        _fail('Antigravity could not check for the CLI', detail: '$error');
+      }
+      return;
+    }
     if (_health.status != KernelHealthStatus.ready) return;
     _setHealth(
       KernelHealth(
@@ -189,16 +208,6 @@ class AntigravityKernel
     _readFailed = false;
     final (id, cwd) = (_sessionId, _cwd);
     if (id == null || cwd == null) {
-      _historyRead();
-      return;
-    }
-    if (RemoteLocation.hostOf(cwd) != null) {
-      _setHealth(
-        const KernelHealth(
-          KernelHealthStatus.failed,
-          setup: KernelSetup(KernelSetupKind.localOnly),
-        ),
-      );
       _historyRead();
       return;
     }
@@ -275,19 +284,10 @@ class AntigravityKernel
   Future<bool> _start(_Run run) async {
     // Not within its caller's frame: a screen opening on it is building.
     await Future<void>.value();
-    if (!identical(_run, run)) return false;
+    if (!identical(_run, run) || _invalidResume) return false;
     final cwd = _cwd;
     if (cwd == null) {
       _fail('Antigravity needs a project folder');
-      return false;
-    }
-    if (RemoteLocation.hostOf(cwd) != null) {
-      _setHealth(
-        const KernelHealth(
-          KernelHealthStatus.failed,
-          setup: KernelSetup(KernelSetupKind.localOnly),
-        ),
-      );
       return false;
     }
     _setHealth(const KernelHealth(KernelHealthStatus.starting));
@@ -304,23 +304,39 @@ class AntigravityKernel
         onNotification: _notification,
       );
       unawaited(connection.exited.then((exit) => _exited(run, exit)));
-      final init = await connection.request('initialize', {
-        'protocolVersion': 1,
-        'clientCapabilities': {
-          'fs': {'readTextFile': false, 'writeTextFile': false},
-          'terminal': false,
-        },
-        'clientInfo': {'name': 'baocode', 'title': 'BaoCode', 'version': '1'},
-      });
+      final init = await connection
+          .request('initialize', {
+            'protocolVersion': 1,
+            'clientCapabilities': {
+              'fs': {'readTextFile': false, 'writeTextFile': false},
+              'terminal': false,
+            },
+            'clientInfo': {
+              'name': 'baocode',
+              'title': 'BaoCode',
+              'version': '1',
+            },
+          })
+          .timeout(const Duration(seconds: 60));
+      if (!identical(_run, run)) return false;
       final capabilities = init['agentCapabilities'];
       final loads = capabilities is Map && capabilities['loadSession'] == true;
       if (ClaudeSdkTools.serversFor(cwd).isNotEmpty) {
-        _tools ??= await _runtime.serveTools(_toolMessage);
+        if (_host == null) {
+          _tools ??= await _runtime.serveTools(_toolMessage);
+        } else {
+          final endpoint = await _runtime.serveTools(_toolMessage);
+          if (!identical(_run, run)) {
+            await endpoint.close();
+            return false;
+          }
+          run.tools = endpoint;
+        }
       }
       final session = <String, Object?>{
-        'cwd': cwd,
+        'cwd': RemoteLocation.pathOf(cwd),
         'mcpServers': [
-          if (_tools case final tools?)
+          if (_toolEndpoint case final tools?)
             {
               'type': 'http',
               'name': ClaudeSdkTools.server,
@@ -341,28 +357,34 @@ class AntigravityKernel
           },
       };
       final Map<String, Object?> started;
-      if (_sessionId case final id? when _prompted) {
+      final resuming = _prompted && _sessionId != null;
+      const startupTimeout = Duration(seconds: 60);
+      if (_sessionId case final id? when resuming) {
         if (!loads) throw const AgyUnavailable('This agy cannot resume');
         // Taken up where it was: read back to this agy too, which is
         // dropped here, the conversation shown already (see [_read]).
         run.resuming = true;
         try {
-          started = await connection.request('session/load', {
-            ...session,
-            'sessionId': id,
-          });
+          started = await connection
+              .request('session/load', {...session, 'sessionId': id})
+              .timeout(startupTimeout);
         } finally {
           run.resuming = false;
         }
+      } else {
+        started = await connection
+            .request('session/new', session)
+            .timeout(startupTimeout);
+      }
+      if (!identical(_run, run)) return false;
+      if (resuming) {
         // What ran before ran in another agy, gone with it.
         _translator.tasks.clear();
       } else {
-        started = await connection.request('session/new', session);
         _sessionId = started['sessionId'] as String?;
       }
-      if (!identical(_run, run)) return false;
       _options(started);
-      await _applyPicks();
+      await _applyPicks().timeout(startupTimeout);
       if (!identical(_run, run)) return false;
       _setHealth(KernelHealth.ready);
       unawaited(_watchRecords());
@@ -417,7 +439,8 @@ class AntigravityKernel
     if (workspace == null) return const [];
     return [
       for (final folder in {...workspace.folders, ...workspace.reaches})
-        if (folder != _cwd) folder,
+        if (folder != _cwd && RemoteLocation.hostOf(folder) == _host)
+          RemoteLocation.pathOf(folder),
     ];
   }
 
@@ -448,6 +471,7 @@ class AntigravityKernel
   void _exited(_Run run, AcpExit exit) {
     if (!identical(run, _run)) return;
     _run = null;
+    run.closeTools();
     // Gone with nothing to do: nothing lost, the next message starts one.
     if (_turn == null && _runningTasks.isEmpty && _asks.isEmpty) return;
     _failAsks();
@@ -467,6 +491,7 @@ class AntigravityKernel
 
   @override
   void restart() {
+    if (_invalidResume) return;
     _end();
     if (_readFailed || _loadingHistory) {
       _setHealth(KernelHealth.idle);
@@ -863,7 +888,7 @@ class AntigravityKernel
     if (_turn != turn.id) return;
     if (!_prompted) {
       _prompted = true;
-      AntigravityCatalog.forget();
+      AntigravityCatalog.forget(_host);
       emitInfoChanged();
     }
     try {
@@ -1325,7 +1350,7 @@ class AntigravityKernel
       message,
       ClaudeSdkCall(
         cwd: cwd,
-        sessionId: _sessionId,
+        sessionId: sessionId,
         cancelled: _toolsCancelled.future,
         ask: _toolAsk,
       ),
@@ -1488,27 +1513,18 @@ class AntigravityKernel
   /// Its models, as agy last told them (in any conversation): offered
   /// until it tells this one's, which a cold agy takes seconds to.
   late List<KernelOption> _models;
-  static List<KernelOption> _lastModels = const [];
+  static Expando<_KeptAgy> _keptByRuntime = Expando();
+  late final _KeptAgy _kept = _keptByRuntime[_runtime] ??= _KeptAgy();
 
-  /// Whether what was kept from the last run ([AgyRuntime.kept]) was read
-  /// back: once a run.
-  static bool _restored = false;
-
-  /// Forgets what was read back, for a test to start afresh.
   @visibleForTesting
-  static void forgetKept() {
-    _restored = false;
-    _lastModels = const [];
-    _limits = const [];
-    _limitsAt = null;
-  }
+  static void forgetKept() => _keptByRuntime = Expando();
 
   void _restore() {
-    if (_restored) return;
-    _restored = true;
+    if (_kept.restored) return;
+    _kept.restored = true;
     final kept = _runtime.kept;
     if (kept == null) return;
-    _lastModels = [
+    _kept.lastModels = [
       for (final model in kept['models'] as List? ?? const [])
         if (model case {'id': final String id, 'name': final String name})
           KernelOption(
@@ -1518,7 +1534,7 @@ class AntigravityKernel
             model['description'] as String? ?? '',
           ),
     ];
-    _limits = [
+    _kept.limits = [
       for (final limit in kept['limits'] as List? ?? const [])
         if (limit case {
           'label': final String label,
@@ -1533,7 +1549,7 @@ class AntigravityKernel
             },
           ),
     ];
-    _limitsAt = switch (kept['limitsAt']) {
+    _kept.limitsAt = switch (kept['limitsAt']) {
       final String at => DateTime.tryParse(at),
       _ => null,
     };
@@ -1544,7 +1560,7 @@ class AntigravityKernel
   void _keep() {
     _runtime.kept = {
       'models': [
-        for (final model in _lastModels)
+        for (final model in _kept.lastModels)
           {
             'id': model.id,
             'name': model.label,
@@ -1552,14 +1568,14 @@ class AntigravityKernel
           },
       ],
       'limits': [
-        for (final limit in _limits)
+        for (final limit in _kept.limits)
           {
             'label': limit.label,
             'utilization': limit.utilization,
             if (limit.resetsAt case final at?) 'resetsAt': at.toIso8601String(),
           },
       ],
-      if (_limitsAt case final at?) 'limitsAt': at.toIso8601String(),
+      if (_kept.limitsAt case final at?) 'limitsAt': at.toIso8601String(),
     };
   }
 
@@ -1613,13 +1629,13 @@ class AntigravityKernel
               ),
           ];
           final changed =
-              told.length != _lastModels.length ||
+              told.length != _kept.lastModels.length ||
               told.indexed.any(
                 (entry) =>
-                    entry.$2.id != _lastModels[entry.$1].id ||
-                    entry.$2.label != _lastModels[entry.$1].label,
+                    entry.$2.id != _kept.lastModels[entry.$1].id ||
+                    entry.$2.label != _kept.lastModels[entry.$1].label,
               );
-          _models = _lastModels = told;
+          _models = _kept.lastModels = told;
           if (changed) _keep();
           _currentModel = current;
         case 'thought_level':
@@ -1793,15 +1809,11 @@ class AntigravityKernel
   }
 
   /// The account's limits as last asked, any session's.
-  static List<RateLimitWindow> _limits = const [];
-  static DateTime? _limitsAt;
-  static Future<void>? _asking;
-
   @override
-  List<RateLimitWindow> get accountLimits => _limits;
+  List<RateLimitWindow> get accountLimits => _kept.limits;
 
   /// Asked lately: shown as they are, not asked again.
-  static bool _limitsFresh(Duration within) => switch (_limitsAt) {
+  bool _limitsFresh(Duration within) => switch (_kept.limitsAt) {
     final at? => DateTime.now().difference(at) < within,
     null => false,
   };
@@ -1809,18 +1821,20 @@ class AntigravityKernel
   @override
   Future<void> refreshUsage() {
     if (_disposed) return Future.value();
-    if (_asking == null && _limitsFresh(const Duration(minutes: 1))) {
-      emit(StatsReported(nextSeq, UsageStats(limits: _limits)));
+    if (_kept.asking == null && _limitsFresh(const Duration(minutes: 1))) {
+      emit(StatsReported(nextSeq, UsageStats(limits: _kept.limits)));
       return Future.value();
     }
-    return _asking ??= _askLimits().whenComplete(() => _asking = null);
+    return _kept.asking ??= _askLimits().whenComplete(
+      () => _kept.asking = null,
+    );
   }
 
   Future<void> _askLimits() async {
     emit(
       StatsReported(
         nextSeq,
-        UsageStats(limits: _limits, limitsState: LimitsState.checking),
+        UsageStats(limits: _kept.limits, limitsState: LimitsState.checking),
       ),
     );
     var state = LimitsState.idle;
@@ -1829,8 +1843,8 @@ class AntigravityKernel
       if (limits == null) {
         state = LimitsState.unavailable;
       } else {
-        _limits = limits;
-        _limitsAt = DateTime.now();
+        _kept.limits = limits;
+        _kept.limitsAt = DateTime.now();
         _keep();
       }
     } on Object {
@@ -1838,7 +1852,10 @@ class AntigravityKernel
     }
     if (_disposed) return;
     emit(
-      StatsReported(nextSeq, UsageStats(limits: _limits, limitsState: state)),
+      StatsReported(
+        nextSeq,
+        UsageStats(limits: _kept.limits, limitsState: state),
+      ),
     );
   }
 
@@ -1985,7 +2002,7 @@ class AntigravityKernel
       _translator.tasks[task.id] = task.copyWith(
         status: failed ? CommandStatus.failed : CommandStatus.succeeded,
         summary: _firstLine(content.substring(match?.end ?? 0)),
-        outputFile: records.taskLog(task.id),
+        outputFile: _taskLog(records, task.id),
       );
       changed = true;
     }
@@ -1993,10 +2010,17 @@ class AntigravityKernel
       ..._translator.tasks.entries,
     ]) {
       if (task.outputFile != null || !_agyTask(id)) continue;
-      _translator.tasks[id] = task.copyWith(outputFile: records.taskLog(id));
+      final output = _taskLog(records, id);
+      if (output == null) continue;
+      _translator.tasks[id] = task.copyWith(outputFile: output);
       changed = true;
     }
     if (changed) _reportTasks();
+  }
+
+  static String? _taskLog(AgyRecords records, String id) {
+    final path = records.taskLog(id);
+    return path.isEmpty ? null : path;
   }
 
   static String? _firstLine(String text) {
@@ -2022,7 +2046,7 @@ class AntigravityKernel
     final configured = await _runtime.mcpServers();
     if (_disposed) return;
     mcpServers = [
-      if (_tools != null)
+      if (_toolEndpoint != null)
         const McpServer(
           name: ClaudeSdkTools.server,
           status: McpServerStatus.connected,
@@ -2077,8 +2101,27 @@ class _Run {
   /// Whether it is taking the conversation up (`session/load`): what agy
   /// reads back to it is dropped, the conversation shown already.
   bool resuming = false;
+  McpEndpoint? tools;
 
-  void end() => connection?.close();
+  void closeTools() {
+    final endpoint = tools;
+    tools = null;
+    if (endpoint != null) unawaited(endpoint.close().catchError((Object _) {}));
+  }
+
+  void end() {
+    connection?.close();
+    closeTools();
+  }
+}
+
+/// Shared only by sessions on the same runtime (and SSH host/account).
+class _KeptAgy {
+  List<KernelOption> lastModels = const [];
+  List<RateLimitWindow> limits = const [];
+  DateTime? limitsAt;
+  Future<void>? asking;
+  bool restored = false;
 }
 
 /// Something agy waits on the user for: its own request, answered with

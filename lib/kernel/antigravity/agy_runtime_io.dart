@@ -17,8 +17,11 @@ import '../acp/mcp_http_server.dart';
 import '../../models/antigravity/antigravity_api.dart';
 import '../agent_kernel.dart' show SessionRecord;
 import '../kernel_types.dart' show RateLimitWindow;
+import 'agy_agent_path.dart';
 import 'agy_runtime.dart';
 import 'antigravity_translator.dart';
+
+export 'agy_agent_path.dart' show agyPath;
 
 AgyRuntime localAgyRuntime() => LocalAgyRuntime();
 
@@ -288,8 +291,7 @@ class LocalAgyRuntime implements AgyRuntime {
 
   /// Google's update feed: `<feed>/<os>_<arch>.json` tells the version, its
   /// download and its SHA-512 (as `agy update` reads it).
-  static const feed =
-      'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests';
+  static const feed = agyUpdateFeed;
 
   static String get _target {
     final os = switch (Platform.operatingSystem) {
@@ -1021,17 +1023,6 @@ if ($bytes -eq $null) { exit 1 }
     }
     final turns = _turnsFile(sessionId);
     if (turns.existsSync()) await turns.delete();
-  }
-}
-
-/// A project's path as agy lists it: URL-encoded (`Application%20Support`).
-@visibleForTesting
-String agyPath(String path) {
-  if (!RegExp('%[0-9A-Fa-f]{2}').hasMatch(path)) return path;
-  try {
-    return Uri.decodeFull(path);
-  } on ArgumentError {
-    return path;
   }
 }
 
