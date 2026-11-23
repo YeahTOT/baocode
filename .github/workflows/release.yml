@@ -46,8 +46,8 @@ jobs:
           $source = [IO.File]::ReadAllText($path)
           $marker = 'UpdateController? _startUpdates(SettingsFiles files) {'
           if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'Unexpected update entry point' }
-          $source = $source.Replace($marker, "$marker`n  return null; /* Preview: the upstream channel does not carry ACP. */")
-          $source = $source.Replace('  return null; /* Preview: the upstream channel does not carry ACP. */', '  if (const bool.fromEnvironment("dart.vm.product")) return null;')
+          $guard = '  if (const bool.fromEnvironment("dart.vm.product")) return null;'
+          $source = $source.Replace($marker, $marker + [Environment]::NewLine + $guard)
           [IO.File]::WriteAllText($path, $source)
           git diff --check
       - name: Build Windows x64 installer
@@ -67,6 +67,7 @@ jobs:
           } finally { $stream.Dispose() }
           $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $name" | Set-Content -LiteralPath "$target.sha256" -Encoding ascii
+          "Upstream source: $env:SOURCE_SHA" | Set-Content -LiteralPath (Join-Path $out.FullName "SOURCE.txt") -Encoding ascii
           "$hash  $name" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
       - uses: actions/upload-artifact@v6
         with:
