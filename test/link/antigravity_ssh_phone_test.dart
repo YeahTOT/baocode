@@ -146,13 +146,12 @@ void main() {
       expect(alpha.startCwds, isEmpty);
       expect(beta.startCwds, [betaProject]);
       expect(beta.newCwds, ['/work/app']);
-      expect(prompt, {
-        'sessionId': 'new-on-host',
-        'prompt': [
-          {'type': 'text', 'text': 'Look at this\n[Image #1]'},
-          {'type': 'image', 'mimeType': 'image/jpeg', 'data': 'AQID'},
-        ],
-      });
+      expect(prompt['sessionId'], 'new-on-host');
+      // Phone and reply-suggestion reminders may follow the user content.
+      expect((prompt['prompt']! as List).take(2), [
+        {'type': 'text', 'text': 'Look at this\n[Image #1]'},
+        {'type': 'image', 'mimeType': 'image/jpeg', 'data': 'AQID'},
+      ]);
     },
   );
 

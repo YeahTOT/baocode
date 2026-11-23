@@ -870,8 +870,10 @@ void main() {
       {'bot': 'assistant', 'name': name, 'data': base64.encode(bytes)},
     ) as Map;
     final first = (await upload('报价单.xlsx'))['path'] as String;
-    expect(first, startsWith('${uploads.path}/phone/'));
-    expect(first, endsWith('/报价单.xlsx'));
+    final portable = first.replaceAll(Platform.pathSeparator, '/');
+    final root = uploads.path.replaceAll(Platform.pathSeparator, '/');
+    expect(portable, startsWith('$root/phone/'));
+    expect(portable, endsWith('/报价单.xlsx'));
     expect(File(first).readAsBytesSync(), bytes);
     // The same name again: a folder of its own, the first one kept.
     final second = (await upload('报价单.xlsx'))['path'] as String;

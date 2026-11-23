@@ -218,7 +218,10 @@ void main() {
         'work-server',
         ready: () async => harness.client,
       );
-      final http = HttpClient();
+      final http = HttpOverrides.runWithHttpOverrides(
+        HttpClient.new,
+        _LoopbackHttpOverrides(),
+      );
       addTearDown(() => http.close(force: true));
       final endpoint = await runtime.serveTools(
         (message) async => {'echo': message['method']},
@@ -249,6 +252,10 @@ const _armArtifactUrl =
     'https://storage.googleapis.com/antigravity-public/'
     'antigravity-cli/1.5.14-5302690847260672/linux-arm/cli_linux_arm64.tar.gz';
 final _checksum = 'ab' * 64;
+
+// Flutter's default test HTTP override blocks all requests. This test
+// connects only to the ephemeral loopback forward created above.
+class _LoopbackHttpOverrides extends HttpOverrides {}
 
 class _RemoteFixture {
   _RemoteFixture({
