@@ -35,7 +35,7 @@ jobs:
         env:
           BAOCODE_SSH_E2E: ${{ runner.temp }}/baocode-ssh-e2e
           BAOCODE_REMOTE_SERVER_DIR: ${{ runner.temp }}/agy-remote-server
-        run: flutter test --run-skipped -t ssh-e2e --name 'Antigravity ACP streams|AGY uses the normal remote' test/remote/ssh_resilience_e2e_test.dart
+        run: flutter test --run-skipped -t ssh-e2e --name 'Antigravity ACP streams|AGY uses the normal remote|AGY chat over SSH' test/remote/ssh_resilience_e2e_test.dart
       - name: Remove Linux SSH fixture
         if: always()
         run: sh tool/ssh_e2e.sh --down

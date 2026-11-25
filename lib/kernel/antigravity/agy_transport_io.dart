@@ -444,10 +444,7 @@ class AgyTransport implements ClaudeCodeTransport {
     }
     await _remoteHistory?.flush();
     if (_remoteHistory?.failed ?? false) {
-      error = [
-        if (error != null) error,
-        'Could not save the remote chat transcript.',
-      ].join(' ');
+      error = [?error, 'Could not save the remote chat transcript.'].join(' ');
     }
     _turn = null;
     final size = _size;
@@ -605,6 +602,10 @@ class AgyTransport implements ClaudeCodeTransport {
   Future<String> _startSession() async {
     _dropConnection();
     final transport = await _runtime.start(launch.cwd);
+    if (_closed) {
+      transport.close();
+      throw const AcpError(AcpError.closedCode, 'Antigravity stopped');
+    }
     final connection = _connection = AcpConnection(
       transport,
       onRequest: _agentRequest,
@@ -711,7 +712,12 @@ class AgyTransport implements ClaudeCodeTransport {
   Future<List<Map<String, Object?>>> _mcpServers() async {
     if (_endpoints.isEmpty) {
       for (final name in _sdkServers) {
-        _endpoints.add(await _startMcp((message) => _mcp(name, message)));
+        final endpoint = await _startMcp((message) => _mcp(name, message));
+        if (_closed || _connection?.done != false) {
+          await endpoint.close();
+          throw const AcpError(AcpError.closedCode, 'Antigravity stopped');
+        }
+        _endpoints.add(endpoint);
       }
     }
     return [

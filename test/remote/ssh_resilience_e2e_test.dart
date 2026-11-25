@@ -16,12 +16,16 @@ import 'dart:typed_data';
 import 'package:bao_remote/client.dart';
 import 'package:baocode/kernel/acp/acp_connection.dart';
 import 'package:baocode/kernel/antigravity/agy_remote_runtime.dart';
+import 'package:baocode/kernel/antigravity/agy_transport_io.dart';
+import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
+import 'package:baocode/remote/remote_location.dart';
 import 'package:baocode/kernel/antigravity/agy_remote_history.dart';
 import 'package:baocode/remote/remote_binaries.dart';
 import 'package:baocode/remote/ssh_host.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import '../kernel/agy_transport_test.dart' show Kernel;
 import 'fault_proxy.dart';
 
 const _container = 'bao-e2e-flaky';
@@ -280,6 +284,67 @@ void main() {
     timeout: timeout,
   );
 
+  test(
+    'AGY chat over SSH resumes the native session on the same host',
+    () async {
+      final client = await open();
+      final home = client.hello!.home;
+      final fixture = '$home/.local/bin/agy';
+      final remote = RemoteAgyRuntime(host.host, connect: () async => client);
+      final install = await client.run('/bin/sh', [
+        '-c',
+        r'''mkdir -p -- "$HOME/.local/bin" && (set -C; cat > "$1") && chmod 700 "$1"''',
+        'install-fixture',
+        fixture,
+      ], stdin: _agyChatFixture);
+      expect(install.exitCode, 0, reason: install.stderr);
+      const session = 'agy-remote-chat-fixture';
+      addTearDown(() async {
+        await client.run('rm', ['--', fixture]);
+        await client.claudeDelete(session);
+      });
+      final location = RemoteLocation.of(host.host, home);
+      expect((await remote.models()).single.id, 'fixture-gemini');
+      final first = await AgyTransport.start(
+        ClaudeLaunch(cwd: location, resume: session),
+        runtime: remote,
+      );
+      addTearDown(first.close);
+      final firstKernel = Kernel(first);
+      await firstKernel.send('A remote chat');
+      expect(firstKernel.results.single['is_error'], isFalse);
+      expect(firstKernel.seen.toString(), contains('created remotely'));
+      first.close();
+      await first.exited;
+
+      final second = await AgyTransport.start(
+        ClaudeLaunch(cwd: location, resume: session),
+        runtime: remote,
+      );
+      addTearDown(second.close);
+      final secondKernel = Kernel(second);
+      await secondKernel.send('Continue that chat');
+      expect(secondKernel.results.single['is_error'], isFalse);
+      expect(secondKernel.seen.toString(), contains('resumed remotely'));
+      second.close();
+      await second.exited;
+      final reopened = await RemoteAgyHistory.open(
+        remote,
+        home,
+        session,
+        persist: false,
+      );
+      expect(
+        reopened.store.prompts.map((m) => m['message'].toString()),
+        containsAllInOrder([
+          contains('A remote chat'),
+          contains('Continue that chat'),
+        ]),
+      );
+    },
+    timeout: timeout,
+  );
+
   test('a network gone silent (nothing sent, nothing reset) is noticed, '
       'and what was asked meanwhile answered once it is back', () async {
     final client = await open();
@@ -483,4 +548,27 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"dur
 printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"chunk":"complete"}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
 while IFS= read -r ignored; do :; done
+''';
+
+const _agyChatFixture = r'''#!/bin/sh
+case "$1" in
+  --version) printf '%s\n' 'agy 1.5.14'; exit 0;;
+  models) printf 'fixture-gemini\tFixture Gemini\n'; exit 0;;
+  acp) ;;
+  *) exit 1;;
+esac
+result() { printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$1"; }
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\),.*/\1/p')
+  [ -n "$id" ] || continue
+  case "$line" in
+    *'"method":"initialize"'*) result '{"protocolVersion":1}';;
+    *'"method":"session/new"'*) reply='created remotely'; result '{"sessionId":"native-chat"}';;
+    *'"method":"session/resume"'*) reply='resumed remotely'; result '{}';;
+    *'"method":"session/prompt"'*)
+      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"native-chat","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$reply"
+      result '{"stopReason":"end_turn"}';;
+    *) result '{}';;
+  esac
+done
 ''';
