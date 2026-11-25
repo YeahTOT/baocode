@@ -126,9 +126,15 @@ void main() {
   }
 
   Future<RemoteClient> open({Duration? grace}) async {
+    final ssh = launcher(grace: grace);
     host = SshHost(
       '$address:${proxy.port}',
-      connect: launcher(grace: grace).connect,
+      // The test binding returns synthetic HTTP 400s. Only the real,
+      // checksum-pinned remote daemon download needs a real HTTP client.
+      connect: (target, {onProgress}) => HttpOverrides.runWithHttpOverrides(
+        () => ssh.connect(target, onProgress: onProgress),
+        _PublishedDaemonHttpOverrides(),
+      ),
     );
     watching = host.reconnected.listen(reconnected.add);
     final client = await host.ready;
@@ -572,3 +578,5 @@ while IFS= read -r line; do
   esac
 done
 ''';
+
+class _PublishedDaemonHttpOverrides extends HttpOverrides {}

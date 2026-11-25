@@ -22,7 +22,10 @@ void main() {
         SshHosts.instance = previous;
       });
       final host = 'wsl+$distro';
-      final client = await hosts[host].ready;
+      final client = await HttpOverrides.runWithHttpOverrides(
+        () => hosts[host].ready,
+        _PublishedDaemonHttpOverrides(),
+      );
       final home = client.hello!.home;
       final fixture = '$home/.local/bin/agy';
       final project = '$home/agy-wsl-fixture';
@@ -73,3 +76,5 @@ case "$1" in
   *) exit 1;;
 esac
 ''';
+
+class _PublishedDaemonHttpOverrides extends HttpOverrides {}
