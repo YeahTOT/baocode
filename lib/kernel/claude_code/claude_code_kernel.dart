@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import '../../chat/chat_models.dart';
 import '../../chat/composer/paste_store.dart';
+import '../../chat/composer/remote_agy_setup.dart';
 import '../../chat/composer/remote_drops.dart';
 import '../../models/codex/codex_service.dart';
 import '../../models/launch_environment.dart';
@@ -3409,6 +3410,20 @@ class ClaudeCodeKernel
   static final _agyRequests = <String, Future<List<AgyModel>>>{};
   List<ProviderModel> _remoteAgyModels = const [];
   String? _remoteAgyWarning;
+  bool? _remoteAgyInstall;
+
+  Future<void> _setupRemoteAgy(
+    BuildContext context,
+    String host,
+    bool install,
+  ) async {
+    await showRemoteAgySetup(
+      context,
+      runtime: RemoteAgyRuntime(host),
+      install: install,
+    );
+    if (!_disposed) await _loadRemoteAgy(host);
+  }
 
   ModelProvider get _remoteAgyProvider => ModelProvider(
     id: _remoteAgyId,
@@ -3433,9 +3448,20 @@ class ClaudeCodeKernel
             ),
       ];
       _remoteAgyWarning = null;
+      _remoteAgyInstall = null;
+    } on AgyUnavailable catch (error) {
+      if (_disposed) return;
+      _remoteAgyModels = const [];
+      _remoteAgyWarning = error.message;
+      _remoteAgyInstall = error.notInstalled
+          ? true
+          : error.signIn
+          ? false
+          : null;
     } on Object {
       if (_disposed) return;
       _remoteAgyWarning = runtime.setup;
+      _remoteAgyInstall = null;
     } finally {
       if (identical(_agyRequests[host], pending)) _agyRequests.remove(host);
     }
@@ -3746,6 +3772,21 @@ class ClaudeCodeKernel
                 warning: provider.id == _remoteAgyId
                     ? _remoteAgyWarning
                     : _providers.error(provider.id),
+                actionLabel:
+                    provider.id == _remoteAgyId && _remoteAgyInstall != null
+                    ? (context) => _remoteAgyInstall!
+                          ? (remoteAgyChinese(context) ? '安装' : 'Install')
+                          : (remoteAgyChinese(context) ? '登录' : 'Sign in')
+                    : null,
+                action: provider.id == _remoteAgyId && _remoteAgyInstall != null
+                    ? (context) {
+                        final host = _remoteAgyHost;
+                        final install = _remoteAgyInstall;
+                        if (host != null && install != null) {
+                          unawaited(_setupRemoteAgy(context, host, install));
+                        }
+                      }
+                    : null,
                 iconBuilder: _providerIcon(provider.id),
               ),
               iconBuilder: _modelIcon(provider.id, info.id),

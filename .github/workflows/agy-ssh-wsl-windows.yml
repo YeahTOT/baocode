@@ -24,7 +24,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - run: flutter pub get
       - name: Test ACP, kernel and the phone bridge
-        run: flutter test test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/link/workspace_bridge_test.dart
+        run: flutter test test/kernel/agy_remote_setup_test.dart test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/link/workspace_bridge_test.dart
       - name: Fetch the server shipped with the Windows installer
         run: dart run tool/fetch_remote_server.dart "$REMOTE_RELEASE" --out "$RUNNER_TEMP/agy-remote-server"
       - name: Create Linux SSH fixture
@@ -59,7 +59,7 @@ jobs:
       - run: choco install innosetup --no-progress -y
       - run: flutter pub get
       - name: Test the Windows app and WSL host selection
-        run: flutter test test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/remote/remote_project_test.dart
+        run: flutter test test/kernel/agy_remote_setup_test.dart test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/remote/remote_project_test.dart
       - name: Smoke-test on a real WSL distribution if the runner has one
         shell: pwsh
         run: |
@@ -88,7 +88,7 @@ jobs:
           $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
           if ($files.Count -ne 1) { throw "Expected one installer, got $($files.Count)" }
           $out = New-Item -ItemType Directory -Path build/agy-artifact -Force
-          $name = 'BaoCode-2.0.6-agy-ssh-wsl-windows-x64-setup.exe'
+          $name = 'BaoCode-2.0.6-oneclick-agy-ssh-wsl-windows-x64-setup.exe'
           $target = Join-Path $out.FullName $name
           Copy-Item -LiteralPath $files[0].FullName -Destination $target
           $stream = [IO.File]::OpenRead($target)
@@ -101,7 +101,7 @@ jobs:
           "$hash  $name" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
       - uses: actions/upload-artifact@v6
         with:
-          name: baocode-2.0.6-agy-ssh-wsl-windows-x64
+          name: baocode-2.0.6-oneclick-agy-ssh-wsl-windows-x64
           path: build/agy-artifact/
           if-no-files-found: error
           retention-days: 14

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:bao_remote/client.dart';
 import 'package:path/path.dart' as p;
@@ -20,9 +21,7 @@ class RemoteAgyRuntime implements AgyRuntime {
   static const wait = Duration(seconds: 30);
   final _live = <_RemoteAcp>{};
 
-  String get setup =>
-      'Install agy in ${RemoteLocation.hostName(host)} and sign in there '
-      'as the project user with agy acp --login.';
+  String get setup => 'Antigravity on ${RemoteLocation.hostName(host)}';
 
   String pathOf(String location) {
     final target = RemoteLocation.hostOf(location);
@@ -109,11 +108,14 @@ bin="$HOME/.local/bin/agy"
           .timeout(wait);
       final models = parseAgyModels(result.stdout);
       if (result.exitCode == 0 && models.isNotEmpty) return models;
-      // The command may print account or diagnostic details. Do not put
-      // those into a local log or model picker.
+      // Use output only to classify the failure, never display or log it.
+      final signIn = RegExp(
+        r'(?:log|sign)\s*in|authenticat|oauth|not logged',
+        caseSensitive: false,
+      ).hasMatch('${result.stdout}\n${result.stderr}');
       throw AgyUnavailable(
         'Antigravity models are not available on $host',
-        detail: setup,
+        signIn: signIn,
       );
     } finally {
       cancel.complete();
@@ -172,21 +174,246 @@ bin="$HOME/.local/bin/agy"
     await Future.wait(live.map((entry) => entry.exited)).timeout(wait);
   }
 
-  Never _manual() =>
-      throw AgyUnavailable('Manage Antigravity on $host', detail: setup);
+  static const _feed =
+      'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests';
+  static const _archiveHost = 'storage.googleapis.com';
+
+  Future<({String version, Uri archive, String checksum})> _release(
+    RemoteClient root,
+  ) async {
+    final arch = switch (root.hello!.platform.arch) {
+      'x64' => 'amd64',
+      'arm64' => 'arm64',
+      _ => throw const AgyUnavailable('Antigravity does not support this CPU'),
+    };
+    final http = HttpClient()..connectionTimeout = wait;
+    try {
+      final request = await http.getUrl(Uri.parse('$_feed/linux_$arch.json'));
+      request.followRedirects = false;
+      final response = await request.close().timeout(wait);
+      if (response.statusCode != 200) {
+        throw const AgyUnavailable(
+          'Google’s Antigravity release feed is unavailable',
+        );
+      }
+      final body = <int>[];
+      await for (final chunk in response.timeout(wait)) {
+        body.addAll(chunk);
+        if (body.length > 65536) {
+          throw const AgyUnavailable('Invalid Antigravity release metadata');
+        }
+      }
+      final json = jsonDecode(utf8.decode(body));
+      if (json case {
+        'version': final String version,
+        'url': final String url,
+        'sha512': final String checksum,
+      }) {
+        final archive = Uri.tryParse(url);
+        if (RegExp(r'^\d+\.\d+\.\d+$').hasMatch(version) &&
+            RegExp(r'^[a-fA-F\d]{128}$').hasMatch(checksum) &&
+            archive != null &&
+            archive.scheme == 'https' &&
+            archive.host == _archiveHost &&
+            archive.port == 443 &&
+            archive.userInfo.isEmpty &&
+            !archive.hasQuery &&
+            !archive.hasFragment &&
+            archive.path.startsWith('/antigravity-public/antigravity-cli/') &&
+            archive.path.endsWith('.tar.gz')) {
+          return (
+            version: version,
+            archive: archive,
+            checksum: checksum.toLowerCase(),
+          );
+        }
+      }
+      throw const AgyUnavailable('Invalid Antigravity release metadata');
+    } finally {
+      http.close(force: true);
+    }
+  }
 
   @override
-  Future<String> latestVersion() async => _manual();
+  Future<String> latestVersion() async =>
+      (await _release(await client)).version;
 
   @override
-  Future<void> install({void Function(double progress)? onProgress}) async =>
-      _manual();
+  Future<void> install({void Function(double progress)? onProgress}) =>
+      installOnHost(onProgress: onProgress);
+
+  Future<void> installOnHost({
+    void Function(double progress)? onProgress,
+    Future<void>? cancel,
+  }) async {
+    var cancelled = false;
+    unawaited(cancel?.then((_) => cancelled = true));
+    final root = await client;
+    if (await _locate(root) != null || cancelled) return;
+    final release = await _release(root);
+    if (cancelled) return;
+    onProgress?.call(0);
+    final ended = Completer<void>();
+    unawaited(
+      cancel?.then((_) {
+        if (!ended.isCompleted) ended.complete();
+      }),
+    );
+    try {
+      final result = await root
+          .run('/bin/sh', [
+            '-c',
+            remoteAgyInstallScript,
+            'baocode-install-agy',
+            release.archive.toString(),
+            release.checksum,
+          ], cancel: ended.future)
+          .timeout(const Duration(minutes: 6));
+      if (cancelled) return;
+      if (result.exitCode != 0 || await _locate(root) == null) {
+        throw const AgyUnavailable(
+          'Could not install Antigravity on this host',
+          detail: 'Check internet access and that curl, tar and sha512sum are available.',
+        );
+      }
+      onProgress?.call(1);
+    } finally {
+      if (!ended.isCompleted) ended.complete();
+    }
+  }
+
+  /// Runs the official interactive CLI login on this host. The user opens
+  /// the Google link and returns the short-lived authorization code in-app.
+  Future<void> signInOnHost({
+    required Future<String?> Function(Uri) authorize,
+    Future<void>? cancel,
+  }) async {
+    final root = await client;
+    final bin = await _executable(root);
+    var cancelled = false;
+    final stop = Completer<void>();
+    unawaited(
+      cancel?.then((_) {
+        cancelled = true;
+        if (!stop.isCompleted) stop.complete();
+      }),
+    );
+    final starting = root.start(bin, const ['acp', '--login']);
+    final RemoteProcess process;
+    try {
+      process = await starting.timeout(wait);
+    } on TimeoutException {
+      unawaited(starting.then<void>(_stop, onError: (Object _) {}));
+      rethrow;
+    }
+    final link = Completer<Uri?>();
+    final tails = ['', ''];
+    void output(int stream, String chunk) {
+      var tail = tails[stream];
+      if (link.isCompleted) return;
+      tail += chunk;
+      final cut = tail.lastIndexOf('\n');
+      if (cut >= 0) {
+        if (agyRemoteOAuthLink(tail.substring(0, cut)) case final uri?) {
+          link.complete(uri);
+        }
+        tail = tail.substring(cut + 1);
+      }
+      tails[stream] = tail.length > 16384 ? '' : tail;
+    }
+
+    final out = const Utf8Decoder(allowMalformed: true)
+        .bind(process.stdout)
+        .listen((chunk) => output(0, chunk), onError: (Object _) {});
+    final err = const Utf8Decoder(allowMalformed: true)
+        .bind(process.stderr)
+        .listen((chunk) => output(1, chunk), onError: (Object _) {});
+    try {
+      final url = await Future.any<Uri?>([
+        link.future,
+        process.exitCode.then((_) => agyRemoteOAuthLink(tails.join('\n'))),
+        stop.future.then((_) => null),
+      ]).timeout(wait);
+      if (cancelled) return;
+      if (url == null) {
+        if (await process.exitCode.timeout(wait) == 0) return;
+        throw const AgyUnavailable(
+          'Antigravity could not start Google sign-in',
+        );
+      }
+      final value = await Future.any<String?>([
+        authorize(url),
+        stop.future.then((_) => null),
+        process.exitCode.then((_) => null),
+      ]).timeout(const Duration(minutes: 9));
+      if (cancelled) return;
+      if (value == null) throw const AgyUnavailable('Google sign-in ended');
+      final code = value.trim();
+      if (code.isEmpty ||
+          code.length > 4096 ||
+          code.contains(RegExp(r'[\x00-\x1f\x7f]'))) {
+        throw const AgyUnavailable('Invalid Google authorization code');
+      }
+      process.write(utf8.encode('$code\n'));
+      final exit = await Future.any<int>([
+        process.exitCode,
+        stop.future.then((_) => RemoteProcess.lostExitCode),
+      ]).timeout(wait);
+      if (exit != 0 && !cancelled) {
+        throw const AgyUnavailable('Google sign-in did not complete');
+      }
+    } finally {
+      unawaited(_stop(process));
+      await out.cancel();
+      await err.cancel();
+    }
+  }
 
   @override
-  Future<void> signIn({Future<void>? cancel}) async => _manual();
+  Future<void> signIn({Future<void>? cancel}) async =>
+      throw const AgyUnavailable('Use the remote Google sign-in dialog');
 
   @override
-  Future<void> signOut() async => _manual();
+  Future<void> signOut() async =>
+      throw const AgyUnavailable('Manage sign-out on the remote host');
+}
+
+/// No user or server-provided text is executed. URL and digest are
+/// independently validated before being passed as positional arguments.
+const remoteAgyInstallScript = r'''
+set -eu
+umask 077
+test -n "$HOME"
+mkdir -p -- "$HOME/.local/bin"
+dest="$HOME/.local/bin/agy"
+[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 0
+tmp=$(mktemp -d "$HOME/.local/bin/.agy-install.XXXXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+curl -fsS --proto '=https' --connect-timeout 15 --max-time 300 -o "$tmp/archive" "$1"
+printf '%s  %s\n' "$2" "$tmp/archive" | sha512sum -c --status
+tar -xOzf "$tmp/archive" antigravity > "$tmp/agy"
+[ -s "$tmp/agy" ]
+chmod 700 "$tmp/agy"
+ln -T -- "$tmp/agy" "$dest"
+''';
+
+/// The only URL the remote sign-in output can offer to open on the client.
+Uri? agyRemoteOAuthLink(String output) {
+  for (final match in RegExp(r'https://[^\s<>"]+').allMatches(output)) {
+    final uri = Uri.tryParse(match.group(0)!);
+    if (uri != null &&
+        uri.scheme == 'https' &&
+        uri.host == 'accounts.google.com' &&
+        uri.port == 443 &&
+        uri.userInfo.isEmpty &&
+        !uri.hasFragment &&
+        uri.path.startsWith('/o/oauth2/') &&
+        uri.hasQuery) {
+      return uri;
+    }
+  }
+  return null;
 }
 
 Future<void> _stop(RemoteProcess process) async {

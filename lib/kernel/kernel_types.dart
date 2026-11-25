@@ -49,6 +49,8 @@ class KernelOptionGroup {
     this.id,
     this.label, {
     this.warning,
+    this.actionLabel,
+    this.action,
     this.iconBuilder,
   });
 
@@ -57,6 +59,10 @@ class KernelOptionGroup {
 
   /// What went wrong with it, marked on its heading.
   final String? warning;
+
+  /// Optional action for a provider that needs setup.
+  final String Function(BuildContext)? actionLabel;
+  final void Function(BuildContext)? action;
 
   /// Drawn before its heading, at a size and in a color (an upstream's
   /// icon); none when null.

@@ -1057,6 +1057,12 @@ class ComposerPickerState extends State<ComposerPicker> {
   }) => _GroupHeading(
     key: key,
     group: group,
+    onAction: group.action == null
+        ? null
+        : () {
+            _setOpen(false);
+            group.action!(context);
+          },
     first: first,
     matches: _matchesIn(group.label),
     collapsed: _collapses ? _collapsed.contains(group.id) : null,
@@ -1216,6 +1222,7 @@ class _GroupHeading extends StatelessWidget {
     this.matches = const [],
     this.collapsed,
     this.onTap,
+    this.onAction,
   });
 
   final KernelOptionGroup? group;
@@ -1225,6 +1232,7 @@ class _GroupHeading extends StatelessWidget {
   final List<int> matches;
   final bool? collapsed;
   final VoidCallback? onTap;
+  final VoidCallback? onAction;
 
   /// From its top to its line, but for the first's.
   static const lineGap = 4.0;
@@ -1288,6 +1296,17 @@ class _GroupHeading extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (group?.actionLabel case final label? when onAction != null)
+                  TextButton(
+                    onPressed: onAction,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 22),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      textStyle: const TextStyle(fontSize: 11),
+                    ),
+                    child: Text(label(context)),
+                  ),
                 // Collapsed, it says so; open, it shows only pointed at.
                 if (collapsed != null && (collapsed || hovered))
                   Icon(
