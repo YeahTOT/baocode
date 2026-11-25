@@ -22,6 +22,7 @@ class SessionStore {
     required this.cwd,
     this.file,
     this.gitBranch,
+    this.writeEntry,
   });
 
   /// Continues the session kept in [file], on the branch it ended on.
@@ -42,6 +43,25 @@ class SessionStore {
     store._load(file, sidechain: sidechain);
     return store;
   }
+
+  /// A transcript already read from another filesystem. Its writer, when
+  /// present, must preserve the order of calls.
+  factory SessionStore.resumeText({
+    required String sessionId,
+    required String cwd,
+    required String text,
+    void Function(Map<String, Object?>)? writeEntry,
+  }) {
+    final store = SessionStore(
+      sessionId: sessionId,
+      cwd: cwd,
+      writeEntry: writeEntry,
+    );
+    store._loadText(text);
+    return store;
+  }
+
+  final void Function(Map<String, Object?>)? writeEntry;
 
   final String sessionId;
   final String cwd;
@@ -68,21 +88,23 @@ class SessionStore {
   /// Reads [path]: a session's file, or a subagent's ([sidechain]), whose
   /// every message is of its side chain.
   void _load(String path, {bool sidechain = false}) {
-    final entries = <Map<String, Object?>>[];
     try {
-      for (final line in const LineSplitter().convert(
-        File(path).readAsStringSync(),
-      )) {
-        if (line.trim().isEmpty) continue;
-        try {
-          final decoded = jsonDecode(line);
-          if (decoded is Map) entries.add(decoded.cast<String, Object?>());
-        } on FormatException {
-          continue;
-        }
-      }
+      _loadText(File(path).readAsStringSync(), sidechain: sidechain);
     } on FileSystemException {
       return;
+    }
+  }
+
+  void _loadText(String text, {bool sidechain = false}) {
+    final entries = <Map<String, Object?>>[];
+    for (final line in const LineSplitter().convert(text)) {
+      if (line.trim().isEmpty) continue;
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is Map) entries.add(decoded.cast<String, Object?>());
+      } on FormatException {
+        continue;
+      }
     }
     for (final entry in entries) {
       if (entry['uuid'] case final String uuid) _byUuid[uuid] = entry;
@@ -149,6 +171,7 @@ class SessionStore {
   }
 
   void _write(Map<String, Object?> entry) {
+    writeEntry?.call(entry);
     final path = file;
     if (path == null) return;
     final out = File(path);

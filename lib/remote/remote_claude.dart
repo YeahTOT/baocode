@@ -37,9 +37,9 @@ const remoteClaudeInstallCommand =
 /// never on what the machine's Claude Code setup names; always on one
 /// only it runs on ([ClaudeLaunch.builtinCore]).
 Future<ClaudeCodeTransport> startClaude(ClaudeLaunch launch) async {
+  if (launch.agy) return startAgy(launch);
   final host = RemoteLocation.hostOf(launch.cwd);
   if (host == null) {
-    if (launch.agy) return startAgy(launch);
     if (launch.builtinCore && launch.env != null) return startDartCore(launch);
     // On this machine: BaoCode's own core, unless the CLI is picked.
     return switch (ClaudeCore.current()) {
@@ -49,12 +49,6 @@ Future<ClaudeCodeTransport> startClaude(ClaudeLaunch launch) async {
       ClaudeCore.builtin => startDartCore(launch),
       ClaudeCore.cli => startClaudeProcess(launch),
     };
-  }
-  if (launch.agy) {
-    throw const ClaudeUnavailable(
-      'Antigravity runs on this machine’s projects only',
-      detail: 'Pick another model for a project over SSH.',
-    );
   }
   return RemoteClaudeTransport.start(SshHosts.instance[host], launch);
 }

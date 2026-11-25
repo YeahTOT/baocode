@@ -5,6 +5,9 @@ import 'dart:io';
 import 'package:bao_agent/bao_agent.dart'
     show AgentPaths, ForeignBrief, SessionStore, newUuid;
 
+import 'package:bao_remote/client.dart' show RemoteForward;
+
+import '../../remote/remote_location.dart';
 import '../acp/acp_connection.dart';
 import '../acp/mcp_endpoint.dart';
 import '../acp/mcp_http_server.dart';
@@ -14,6 +17,8 @@ import '../claude_code/control_channel.dart';
 import 'acp_to_claude.dart';
 import 'agy_context.dart';
 import 'agy_runtime.dart';
+import 'agy_remote_history.dart';
+import 'agy_remote_runtime.dart';
 import 'handoff.dart';
 
 /// A session on Google's Antigravity CLI (`agy acp`), spoken to as Claude
@@ -28,7 +33,13 @@ import 'handoff.dart';
 /// agy is started on the first message, not as the conversation opens, and
 /// ended once idle a while; started again, it resumes its session.
 class AgyTransport implements ClaudeCodeTransport {
-  AgyTransport._(this.launch, this._runtime, this._store, this._environment) {
+  AgyTransport._(
+    this.launch,
+    this._runtime,
+    this._store,
+    this._environment, {
+    RemoteAgyHistory? history,
+  }) : _remoteHistory = history {
     _mode = launch.permissionMode ?? 'default';
     _model = launch.model;
     _effort = launch.effort;
@@ -96,11 +107,53 @@ class AgyTransport implements ClaudeCodeTransport {
   final AgyRuntime _runtime;
   final SessionStore _store;
   final Map<String, String> _environment;
+  final RemoteAgyHistory? _remoteHistory;
+  RemoteAgyRuntime? get _remote => switch (_runtime) {
+    final RemoteAgyRuntime runtime => runtime,
+    _ => null,
+  };
+  String get _agentCwd => _remote?.pathOf(launch.cwd) ?? launch.cwd;
 
   static Future<ClaudeCodeTransport> start(
     ClaudeLaunch launch, {
     AgyRuntime? runtime,
   }) async {
+    final host = RemoteLocation.hostOf(launch.cwd);
+    if (host != null) {
+      final remote = runtime is RemoteAgyRuntime
+          ? runtime
+          : RemoteAgyRuntime(host);
+      final cwd = remote.pathOf(launch.cwd);
+      final client = await remote.client;
+      if (await client.stat(cwd).timeout(RemoteAgyRuntime.wait) !=
+          'directory') {
+        throw ClaudeFolderGone(launch.cwd);
+      }
+      try {
+        if (await remote.version() == null) {
+          throw AgyUnavailable(
+            'Antigravity is not installed on $host',
+            detail: remote.setup,
+          );
+        }
+        final id = launch.resume ?? newUuid();
+        final (:history, :store) = await RemoteAgyHistory.open(
+          remote,
+          cwd,
+          id,
+          persist: launch.persist,
+        );
+        return AgyTransport._(
+          launch,
+          remote,
+          store,
+          const {},
+          history: history,
+        );
+      } on AgyUnavailable catch (error) {
+        throw ClaudeUnavailable(error.message, detail: error.detail);
+      }
+    }
     if (!Directory(launch.cwd).existsSync()) {
       throw ClaudeFolderGone(launch.cwd);
     }
@@ -140,7 +193,10 @@ class AgyTransport implements ClaudeCodeTransport {
   Stream<Map<String, Object?>> get messages => _out.stream;
 
   @override
-  Future<void> get exited => _out.done;
+  Future<void> get exited async {
+    await _out.done;
+    await _remoteHistory?.flush();
+  }
 
   void _emit(Map<String, Object?> message) {
     if (!_out.isClosed) {
@@ -353,7 +409,8 @@ class AgyTransport implements ClaudeCodeTransport {
       _usageOf(response['usage']);
     } on AgyUnavailable catch (unavailable) {
       error = unavailable.signIn
-          ? 'Sign in to Antigravity in Settings → Models → Antigravity.'
+          ? (_remote?.setup ??
+                'Sign in to Antigravity in Settings → Models → Antigravity.')
           : '$unavailable';
     } on AcpError catch (failure) {
       error = turn.stalled
@@ -362,6 +419,11 @@ class AgyTransport implements ClaudeCodeTransport {
           ? null
           : _said(failure.message, failure.data);
       if (failure.closed) _dropConnection();
+    } on Object {
+      if (_remote == null) rethrow;
+      error =
+          'Antigravity lost access to the remote project. ${_remote!.setup}';
+      _dropConnection();
     } finally {
       watchdog.cancel();
     }
@@ -379,6 +441,13 @@ class AgyTransport implements ClaudeCodeTransport {
         'syncedUuid': _synced,
         'handedOff': _handedOff,
       });
+    }
+    await _remoteHistory?.flush();
+    if (_remoteHistory?.failed ?? false) {
+      error = [
+        if (error != null) error,
+        'Could not save the remote chat transcript.',
+      ].join(' ');
     }
     _turn = null;
     final size = _size;
@@ -548,10 +617,14 @@ class AgyTransport implements ClaudeCodeTransport {
     );
     await connection.request('initialize', agyHello);
     final base = <String, Object?>{
-      'cwd': launch.cwd,
+      'cwd': _agentCwd,
       'mcpServers': await _mcpServers(),
       if (launch.directories.isNotEmpty)
-        'additionalDirectories': launch.directories,
+        'additionalDirectories': [
+          for (final path in launch.directories)
+            if (_remote == null || RemoteLocation.hostOf(path) == _remote!.host)
+              _remote?.pathOf(path) ?? path,
+        ],
     };
     var resumed = false;
     if ((_agySession, _synced) case (final id?, final synced?)
@@ -601,6 +674,7 @@ class AgyTransport implements ClaudeCodeTransport {
   ].join('\n\n');
 
   ForeignBrief _brief() {
+    if (_remote != null) return const ForeignBrief();
     try {
       return ForeignBrief.of(
         environment: _environment,
@@ -637,9 +711,7 @@ class AgyTransport implements ClaudeCodeTransport {
   Future<List<Map<String, Object?>>> _mcpServers() async {
     if (_endpoints.isEmpty) {
       for (final name in _sdkServers) {
-        _endpoints.add(
-          await McpHttpServer.start((message) => _mcp(name, message)),
-        );
+        _endpoints.add(await _startMcp((message) => _mcp(name, message)));
       }
     }
     return [
@@ -656,6 +728,20 @@ class AgyTransport implements ClaudeCodeTransport {
     ];
   }
 
+  Future<McpEndpoint> _startMcp(McpHandler handler) async {
+    final local = await McpHttpServer.start(handler);
+    final remote = _remote;
+    if (remote == null) return local;
+    try {
+      final client = await remote.client;
+      final forward = await client.forward(local.url.port);
+      return _ForwardedAgyMcp(local, forward);
+    } on Object {
+      await local.close();
+      rethrow;
+    }
+  }
+
   Future<Map<String, Object?>?> _mcp(
     String server,
     Map<String, Object?> message,
@@ -670,6 +756,12 @@ class AgyTransport implements ClaudeCodeTransport {
 
   /// Ends agy's process: the session stays agy's, resumed on the next.
   void _dropConnection() {
+    if (_remote != null) {
+      for (final endpoint in _endpoints) {
+        unawaited(endpoint.close());
+      }
+      _endpoints.clear();
+    }
     final connection = _connection;
     _connection = null;
     _open = false;
@@ -1220,6 +1312,28 @@ class AgyTransport implements ClaudeCodeTransport {
     _out
       ..add(ClaudeExit.message(0, ''))
       ..close();
+  }
+}
+
+class _ForwardedAgyMcp implements McpEndpoint {
+  _ForwardedAgyMcp(this._local, this._forward);
+  final McpEndpoint _local;
+  final RemoteForward _forward;
+
+  @override
+  Uri get url => _local.url.replace(port: _forward.remotePort);
+
+  @override
+  Map<String, String> get headers => _local.headers;
+
+  @override
+  Future<void> close() async {
+    await _local.close();
+    try {
+      await _forward.close().timeout(RemoteAgyRuntime.wait);
+    } on Object {
+      // A lost host also lost its listener.
+    }
   }
 }
 

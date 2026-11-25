@@ -1,0 +1,107 @@
+name: BaoCode AGY SSH and WSL
+on:
+  push:
+    branches: [feature/agy-acp-ssh-wsl]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  UPSTREAM_SHA: 6ae4c8353c95858766b5acee5ba8640c9ea924e0
+  REMOTE_RELEASE: 2.0.6.39-91b816af4af1
+  FLUTTER_VERSION: 3.47.5
+jobs:
+  linux-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - uses: ./.github/actions/setup-rust
+      - run: flutter pub get
+      - name: Test ACP, kernel and the phone bridge
+        run: flutter test test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/link/workspace_bridge_test.dart
+      - name: Fetch the server shipped with the Windows installer
+        run: dart run tool/fetch_remote_server.dart "$REMOTE_RELEASE" --out "$RUNNER_TEMP/agy-remote-server"
+      - name: Create Linux SSH fixture
+        env:
+          BAOCODE_SSH_E2E: ${{ runner.temp }}/baocode-ssh-e2e
+        run: sh tool/ssh_e2e.sh --containers-only
+      - name: Test ACP reconnect and remote history on OpenSSH
+        env:
+          BAOCODE_SSH_E2E: ${{ runner.temp }}/baocode-ssh-e2e
+          BAOCODE_REMOTE_SERVER_DIR: ${{ runner.temp }}/agy-remote-server
+        run: flutter test --run-skipped -t ssh-e2e --name 'Antigravity ACP streams|AGY uses the normal remote' test/remote/ssh_resilience_e2e_test.dart
+      - name: Remove Linux SSH fixture
+        if: always()
+        run: sh tool/ssh_e2e.sh --down
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify upstream base
+        shell: pwsh
+        run: git merge-base --is-ancestor $env:UPSTREAM_SHA HEAD
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - uses: ./.github/actions/setup-rust
+      - run: choco install innosetup --no-progress -y
+      - run: flutter pub get
+      - name: Test the Windows app and WSL host selection
+        run: flutter test test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/remote/remote_project_test.dart
+      - name: Smoke-test on a real WSL distribution if the runner has one
+        shell: pwsh
+        run: |
+          $distros = @(& wsl.exe --list --quiet 2>$null | ForEach-Object { ($_ -replace ([string][char]0), '').Trim() } | Where-Object { $_ -match '^(Ubuntu[\w.-]*|Debian)$' })
+          if (!$distros.Count) {
+            'No WSL distribution on this runner; routing unit tests ran, live WSL smoke test skipped.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          $env:BAOCODE_AGY_WSL_FIXTURE = $distros[0]
+          & wsl.exe --distribution $env:BAOCODE_AGY_WSL_FIXTURE --exec /bin/true
+          if ($LASTEXITCODE -ne 0) {
+            'The runner cannot start its WSL distro; live WSL smoke test skipped.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          $env:BAOCODE_REMOTE_SERVER_DIR = "$env:RUNNER_TEMP/agy-remote-server"
+          dart run tool/fetch_remote_server.dart $env:REMOTE_RELEASE --out $env:BAOCODE_REMOTE_SERVER_DIR
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter test --run-skipped -t wsl-e2e test/remote/agy_wsl_e2e_test.dart
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Live WSL fixture passed.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+      - name: Build Windows x64 installer
+        run: dart run tool/build_windows.dart --arch x64 --remote-release $env:REMOTE_RELEASE
+      - name: Verify Windows installer and record source
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
+          if ($files.Count -ne 1) { throw "Expected one installer, got $($files.Count)" }
+          $out = New-Item -ItemType Directory -Path build/agy-artifact -Force
+          $name = 'BaoCode-2.0.6-agy-ssh-wsl-windows-x64-setup.exe'
+          $target = Join-Path $out.FullName $name
+          Copy-Item -LiteralPath $files[0].FullName -Destination $target
+          $stream = [IO.File]::OpenRead($target)
+          try {
+            if ($stream.Length -lt 1MB -or $stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw 'Not a Windows installer' }
+          } finally { $stream.Dispose() }
+          $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -LiteralPath "$target.sha256" -Encoding ascii
+          @("Upstream source: $env:UPSTREAM_SHA", "Build commit: $env:GITHUB_SHA", "Remote server: $env:REMOTE_RELEASE") | Set-Content -LiteralPath (Join-Path $out.FullName "SOURCE.txt") -Encoding ascii
+          "$hash  $name" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+      - uses: actions/upload-artifact@v6
+        with:
+          name: baocode-2.0.6-agy-ssh-wsl-windows-x64
+          path: build/agy-artifact/
+          if-no-files-found: error
+          retention-days: 14

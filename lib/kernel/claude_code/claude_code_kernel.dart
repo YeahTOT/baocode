@@ -24,6 +24,8 @@ import '../../usage/usage_ledger.dart';
 import '../../workspace/editor_launcher.dart' show openExternal;
 import '../agent_kernel.dart';
 import '../antigravity/agy_quota.dart';
+import '../antigravity/agy_remote_runtime.dart';
+import '../antigravity/agy_runtime.dart';
 import '../commit_attribution.dart';
 import '../extension_switches.dart';
 import '../kernel_event.dart';
@@ -163,6 +165,9 @@ class ClaudeCodeKernel
     );
     _model = settings[KernelChoiceKind.model.name];
     _effort = settings[KernelChoiceKind.effort.name];
+    if (_remoteAgyHost case final host? when _agyOffered) {
+      unawaited(_loadRemoteAgy(host));
+    }
     _window = switch (parseTokens(
       settings[KernelChoiceKind.context.name] ?? '',
     )) {
@@ -191,7 +196,7 @@ class ClaudeCodeKernel
     // not on the context another model was last on.
     if ((_context.resume, _model, _window)
         case (_?, final model?, final window?)
-        when _providers.resolve(model) != null) {
+        when _resolveModel(model) != null) {
       _pickedWindows[model] = window;
     }
     Future<ClaudeHistoryPage> wholePage(
@@ -414,7 +419,7 @@ class ClaudeCodeKernel
   /// if offered there, else to the first upstream's.
   String? get _model {
     final picked = _pickedModel;
-    if (_providers.resolve(picked) != null) return picked;
+    if (_resolveModel(picked) != null) return picked;
     if (_providers.builtinAvailable &&
         (parseModelRef(picked) == null || _providers.builtinOffered)) {
       return picked;
@@ -612,6 +617,9 @@ class ClaudeCodeKernel
     return (
       provider: _providerKey,
       model: switch (custom) {
+        (final provider, final info)
+            when provider.id == _remoteAgyId && info.id == 'default' =>
+          null,
         (final provider, final info) => requestedModel(
           provider,
           info,
@@ -1227,7 +1235,7 @@ class ClaudeCodeKernel
     }
     _permissions.clear();
     // What the turn spent of Antigravity's limits.
-    if (_onAgy) unawaited(_agyQuota.refresh());
+    if (_localAgy) unawaited(_agyQuota.refresh());
     // Stopped too: its work folds all the same (the session file tells it
     // was stopped).
     if (worked != null) {
@@ -2504,7 +2512,7 @@ class ClaudeCodeKernel
 
   /// Whether [model] is held to a limit known here: the plan's, or its
   /// ChatGPT accounts' quota; not another provider's.
-  bool _hasLimit(String? model) => switch (_providers.resolve(model)) {
+  bool _hasLimit(String? model) => switch (_resolveModel(model)) {
     (final provider, _) => provider.protocol.usesAccounts,
     null => true,
   };
@@ -2625,8 +2633,11 @@ class ClaudeCodeKernel
   }
 
   @override
-  List<RateLimitWindow> get accountLimits =>
-      _onAgy ? AgyQuota.current.windows : _limits;
+  List<RateLimitWindow> get accountLimits => _localAgy
+      ? AgyQuota.current.windows
+      : _onAgy
+      ? const []
+      : _limits;
 
   // The account's usage, asked for (as `/usage` does): no more than once in
   // [_usageFresh], and one request at a time for all sessions.
@@ -2655,7 +2666,11 @@ class ClaudeCodeKernel
   @override
   Future<void> refreshUsage() {
     // Antigravity's account, on its model: its own limits.
-    if (_onAgy) return _agyQuota.refresh();
+    if (_localAgy) return _agyQuota.refresh();
+    if (_onAgy) {
+      if (_remoteAgyHost case final host?) return _loadRemoteAgy(host);
+      return Future.value();
+    }
     if (_usageFetchedAt case final at?
         when DateTime.now().difference(at) < _usageFresh) {
       return Future.value();
@@ -2769,8 +2784,12 @@ class ClaudeCodeKernel
       nextSeq,
       UsageStats(
         costUsd: _cost,
-        limits: _onAgy ? _agyQuota.windows : _limits,
-        limitsState: _onAgy ? _agyQuota.state : _limitsState,
+        limits: accountLimits,
+        limitsState: _localAgy
+            ? _agyQuota.state
+            : _onAgy
+            ? LimitsState.unavailable
+            : _limitsState,
         limitsOffBy: _onAgy ? null : _limitsOffBy,
         cache: switch (_requests[_lastRequest]) {
           final last? when _cachingModels.contains(_lastModel) => PromptCache(
@@ -3361,7 +3380,7 @@ class ClaudeCodeKernel
   // --- Providers --------------------------------------------------------------------
 
   /// The provider and model of the user's [_model] picks, if it is one.
-  (ModelProvider, ProviderModel)? get _custom => _providers.resolve(_model);
+  (ModelProvider, ProviderModel)? get _custom => _resolveModel(_model);
 
   /// Whether the model picked is Antigravity's, run on its CLI.
   bool get _onAgy => switch (_custom) {
@@ -3370,16 +3389,83 @@ class ClaudeCodeKernel
     null => false,
   };
 
-  /// Whether Antigravity's models are offered here: on this machine's
-  /// projects, not over SSH; not to a bot, which works unwatched.
+  /// Antigravity's consumer sign-in is used only in a directly driven chat.
   bool get _agyOffered =>
-      !RemoteLocation.isRemote(_cwd) &&
-      _workspace?.tools == null &&
-      !(_workspace?.approvesAll ?? false);
+      _workspace?.tools == null && !(_workspace?.approvesAll ?? false);
+
+  bool get _localAgy => _onAgy && !RemoteLocation.isRemote(_cwd);
+
+  String? get _remoteAgyHost =>
+      !kIsWeb && RemoteLocation.pathOf(_cwd).startsWith('/')
+      ? RemoteLocation.hostOf(_cwd)
+      : null;
+
+  static const _remoteAgyId = 'agy-remote-acp';
+  static const _remoteAgyDefault = ProviderModel(
+    id: 'default',
+    label: 'Default',
+    efforts: [],
+  );
+  static final _agyRequests = <String, Future<List<AgyModel>>>{};
+  List<ProviderModel> _remoteAgyModels = const [];
+  String? _remoteAgyWarning;
+
+  ModelProvider get _remoteAgyProvider => ModelProvider(
+    id: _remoteAgyId,
+    name: 'Antigravity · ${RemoteLocation.hostName(_remoteAgyHost!)}',
+    protocol: ProviderProtocol.agy,
+    models: [_remoteAgyDefault, ..._remoteAgyModels],
+  );
+
+  Future<void> _loadRemoteAgy(String host) async {
+    final runtime = RemoteAgyRuntime(host);
+    final pending = _agyRequests.putIfAbsent(host, () => runtime.models());
+    try {
+      final models = await pending;
+      if (_disposed) return;
+      _remoteAgyModels = [
+        for (final model in models)
+          if (model.id != 'default')
+            ProviderModel(
+              id: model.id,
+              label: model.label,
+              efforts: model.efforts,
+            ),
+      ];
+      _remoteAgyWarning = null;
+    } on Object {
+      if (_disposed) return;
+      _remoteAgyWarning = runtime.setup;
+    } finally {
+      if (identical(_agyRequests[host], pending)) _agyRequests.remove(host);
+    }
+    if (!_disposed) emitInfoChanged();
+  }
+
+  (ModelProvider, ProviderModel)? _resolveModel(String? model) {
+    final parsed = parseModelRef(model);
+    if (_remoteAgyHost != null &&
+        _agyOffered &&
+        parsed?.provider == _remoteAgyId) {
+      final provider = _remoteAgyProvider;
+      final id = parsed!.model;
+      return (
+        provider,
+        provider.model(id) ?? ProviderModel(id: id, efforts: []),
+      );
+    }
+    final resolved = _providers.resolve(model);
+    if (resolved != null &&
+        resolved.$1.protocolOf(resolved.$2) == ProviderProtocol.agy &&
+        (!_agyOffered || RemoteLocation.isRemote(_cwd))) {
+      return null;
+    }
+    return resolved;
+  }
 
   /// What a session on [model] is started on: '' for Claude Code as the
   /// user set it up, else the provider and its setup.
-  String _providerKeyOf(String? model) => switch (_providers.resolve(model)) {
+  String _providerKeyOf(String? model) => switch (_resolveModel(model)) {
     (final provider, _) => '${provider.id}|${provider.launchFingerprint}',
     null => '',
   };
@@ -3422,7 +3508,7 @@ class ClaudeCodeKernel
     // message to start one on the model now picked.
     if (_transport != null &&
         _launchedModel != null &&
-        _providers.resolve(_launchedModel) == null) {
+        _resolveModel(_launchedModel) == null) {
       _launchedModel = null;
       release();
     }
@@ -3462,7 +3548,7 @@ class ClaudeCodeKernel
     // Picked again over the one answering in its place: switched back to.
     final again = _fallback != null;
     _fallback = null;
-    final target = _providers.resolve(id);
+    final target = _resolveModel(id);
     final sameProvider = _providerKeyOf(id) == _onProvider;
     // Its own effort and context, if it had them: not the one before's.
     if (_pickedWindows[id] case final window?) _window = window;
@@ -3597,7 +3683,7 @@ class ClaudeCodeKernel
         );
 
   List<String> _effortLevelsOf(String model) {
-    if (_providers.resolve(model) case (_, final info)) {
+    if (_resolveModel(model) case (_, final info)) {
       return info.effortLevels;
     }
     if (parseModelRef(model) != null) return const [];
@@ -3609,8 +3695,10 @@ class ClaudeCodeKernel
     options: () {
       final providers = [
         for (final provider in _providers.enabled)
-          if (provider.protocol != ProviderProtocol.agy || _agyOffered)
+          if (provider.protocol != ProviderProtocol.agy ||
+              (_agyOffered && !RemoteLocation.isRemote(_cwd)))
             provider,
+        if (_remoteAgyHost != null && _agyOffered) _remoteAgyProvider,
       ];
       return [
         // Shown unless turned off in Settings → Models; never on BaoCode's
@@ -3655,7 +3743,9 @@ class ClaudeCodeKernel
               group: KernelOptionGroup(
                 provider.id,
                 provider.name,
-                warning: _providers.error(provider.id),
+                warning: provider.id == _remoteAgyId
+                    ? _remoteAgyWarning
+                    : _providers.error(provider.id),
                 iconBuilder: _providerIcon(provider.id),
               ),
               iconBuilder: _modelIcon(provider.id, info.id),
@@ -3685,7 +3775,7 @@ class ClaudeCodeKernel
   late final ModelSetting contextSize = _ModelSetting(
     optionsFor: (model) {
       // A provider's model: what it offers, by the number of tokens.
-      if (_providers.resolve(model) case (_, final info)) {
+      if (_resolveModel(model) case (_, final info)) {
         return [
           for (final tokens in info.contextOptions)
             KernelOption(
@@ -3720,7 +3810,7 @@ class ClaudeCodeKernel
     },
     selectedFor: (model) {
       if (model == this.model.selected) return contextSize.selected;
-      if (_providers.resolve(model) case (_, final info)) {
+      if (_resolveModel(model) case (_, final info)) {
         final picked = _pickedWindows[model];
         return '${info.contextOptions.contains(picked) ? picked : info.initialContext}';
       }
@@ -3733,7 +3823,7 @@ class ClaudeCodeKernel
     select: (model, id) {
       final switching = model != this.model.selected;
       if (switching) _keepModelSettings();
-      if (_providers.resolve(model) != null) {
+      if (_resolveModel(model) != null) {
         final tokens = parseTokens(id);
         if (tokens == null || tokens <= 0) return;
         _window = _pickedWindows[model] = tokens;
@@ -3980,7 +4070,7 @@ class ClaudeCodeKernel
     selectedFor: (model) {
       if (model == this.model.selected) return effort.selected;
       final level = _pickedEfforts[model] ?? _effort;
-      if (_providers.resolve(model) case (_, final info)) {
+      if (_resolveModel(model) case (_, final info)) {
         return info.effortLevels.contains(level) ? level : info.initialEffort;
       }
       return _effortLevelsOf(model).contains(level) ? level : null;
@@ -3988,7 +4078,7 @@ class ClaudeCodeKernel
     select: (model, id) {
       if (model != this.model.selected) _keepModelSettings();
       _pickedEfforts[model] = id;
-      if (_providers.resolve(model) case (final provider, final info)) {
+      if (_resolveModel(model) case (final provider, final info)) {
         _effort = _appliedEffort = id;
         if (model != _model || _providerKeyOf(model) != _launchedProvider) {
           _selectModel(model, keep: false);
@@ -4039,7 +4129,7 @@ class ClaudeCodeKernel
   @override
   late final ModelSetting fast = _ModelSetting(
     toggle: true,
-    optionsFor: (model) => switch (_providers.resolve(model)) {
+    optionsFor: (model) => switch (_resolveModel(model)) {
       (final provider, final info)
           when provider.protocolOf(info) == ProviderProtocol.openaiResponses ||
               provider.protocolOf(info) == ProviderProtocol.codex =>
@@ -4052,7 +4142,7 @@ class ClaudeCodeKernel
       if (id != 'fast' || fast.optionsFor(model).isEmpty) return;
       if (model != this.model.selected) _keepModelSettings();
       _pickedFast[model] = _pickedFast[model] != true;
-      if (_providers.resolve(model) case (final provider, final info)) {
+      if (_resolveModel(model) case (final provider, final info)) {
         if (model != _model || _providerKeyOf(model) != _launchedProvider) {
           _selectModel(model, keep: false);
         } else {

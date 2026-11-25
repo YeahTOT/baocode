@@ -695,6 +695,8 @@ void followSettingsFiles(SettingsFiles files) {
 /// `update.mode` says, from baocode.dev, installed as the app quits. None
 /// where the build does not update itself.
 UpdateController? _startUpdates(SettingsFiles files) {
+  // The official updater cannot replace this fork's remote ACP build.
+  if (currentAppVersion.marketing.endsWith('-agy-ssh-wsl')) return null;
   final platform = platformUpdates(
     updatesDirectory: DataDirectory.current.updatesDir,
   );

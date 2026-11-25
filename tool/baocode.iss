@@ -43,6 +43,14 @@
   #define VersionNumber AppVersion
 #endif
 
+; The displayed SemVer may include a pre-release name, while the PE
+; version resource requires only decimal components.
+#define NumericVersion VersionNumber
+#if Pos("-", VersionNumber) > 0
+  #undef NumericVersion
+  #define NumericVersion Copy(VersionNumber, 1, Pos("-", VersionNumber) - 1)
+#endif
+
 [Setup]
 ; Base of the identity Windows uses for the installed app. It must not change
 ; between versions, or an upgrade installs beside the old one instead of over
@@ -60,7 +68,7 @@ OutputBaseFilename=BaoCode-{#VersionNumber}-setup{#ArchSuffix}{#Edition}
 OutputDir={#OutDir}
 ; What Explorer shows for the installer itself. Windows wants four numbers,
 ; where pubspec's version has three.
-VersionInfoVersion={#VersionNumber}.0
+VersionInfoVersion={#NumericVersion}.0
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
