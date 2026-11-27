@@ -6,8 +6,8 @@ on:
 permissions:
   contents: read
 env:
-  UPSTREAM_SHA: 6ae4c8353c95858766b5acee5ba8640c9ea924e0
-  REMOTE_RELEASE: 2.0.6.39-91b816af4af1
+  UPSTREAM_SHA: 5393d6878626c004b1b65c462b47831f31c4793f
+  REMOTE_RELEASE: 2.0.9.42-9ecdc07f5063
   FLUTTER_VERSION: 3.47.5
 jobs:
   linux-ssh:
@@ -24,7 +24,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - run: flutter pub get
       - name: Test ACP, kernel and the phone bridge
-        run: flutter test test/kernel/agy_remote_setup_test.dart test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/link/workspace_bridge_test.dart
+        run: flutter test test/kernel/agy_remote_setup_test.dart test/kernel/agy_remote_project_test.dart test/kernel/agy_transport_test.dart test/link/workspace_bridge_test.dart test/remote/remote_model_selection_test.dart test/remote/remote_skills_test.dart test/update/version_test.dart packages/bao_agent/test/units/session_store_test.dart
       - name: Fetch the server shipped with the Windows installer
         run: dart run tool/fetch_remote_server.dart "$REMOTE_RELEASE" --out "$RUNNER_TEMP/agy-remote-server"
       - name: Create Linux SSH fixture
@@ -88,7 +88,7 @@ jobs:
           $files = @(Get-ChildItem -LiteralPath build/installers -File -Filter 'BaoCode-*-setup.exe')
           if ($files.Count -ne 1) { throw "Expected one installer, got $($files.Count)" }
           $out = New-Item -ItemType Directory -Path build/agy-artifact -Force
-          $name = 'BaoCode-2.0.6-oneclick-agy-ssh-wsl-windows-x64-setup.exe'
+          $name = 'BaoCode-2.0.9-oneclick-agy-ssh-wsl-windows-x64-setup.exe'
           $target = Join-Path $out.FullName $name
           Copy-Item -LiteralPath $files[0].FullName -Destination $target
           $stream = [IO.File]::OpenRead($target)
@@ -101,7 +101,7 @@ jobs:
           "$hash  $name" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
       - uses: actions/upload-artifact@v6
         with:
-          name: baocode-2.0.6-oneclick-agy-ssh-wsl-windows-x64
+          name: baocode-2.0.9-oneclick-agy-ssh-wsl-windows-x64
           path: build/agy-artifact/
           if-no-files-found: error
           retention-days: 14

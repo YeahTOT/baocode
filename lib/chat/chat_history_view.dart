@@ -734,6 +734,11 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   /// The press went to the bar over the selection (see [_placeBubbleBy]).
   bool _pressOnBubble = false;
 
+  /// The last press in the history, which [_handlePointerDown] saw (and,
+  /// selecting, gave a bar of its own): not one outside the bar's to take
+  /// that away again (see [_buildBubble]).
+  int? _historyPress;
+
   // --- Scrubbing ---------------------------------------------------------------
   //
   // The minimap's glass or the bar's thumb dragged: each frame a jump to rows
@@ -1758,6 +1763,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
 
   void _handlePointerDown(PointerDownEvent event) {
     _pressedDevices.add(event.device);
+    _historyPress = event.pointer;
     final onBubble = _pressOnBubble;
     _pressOnBubble = false;
     if (!onBubble) _hideBubble();
@@ -2303,7 +2309,13 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
           key: ValueKey(_bubbleShows),
           child: shown != 0
               ? TapRegion(
-                  onTapOutside: (_) => _hideBubble(),
+                  // A press elsewhere in the app. One in the history was
+                  // seen there first (it hears it first, being deeper): it
+                  // took the bar away and, starting a selection, may have
+                  // had it come back, which this would undo.
+                  onTapOutside: (event) {
+                    if (event.pointer != _historyPress) _hideBubble();
+                  },
                   child: PopIn(
                     // As the user's messages are: their fill and line.
                     child: SelectionBubble(
@@ -2413,8 +2425,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
       final viewport = RenderAbstractViewport.maybeOf(item);
       if (viewport is! RenderBox) return false;
       final top =
-          item.localToGlobal(Offset.zero).dy -
-          (viewport as RenderBox).localToGlobal(Offset.zero).dy +
+          item.localToGlobal(Offset.zero, ancestor: viewport).dy +
           _gapBefore(index);
       return top < _editorInset;
     }
@@ -2595,8 +2606,12 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     // Not following the end as the editor grows: that would push its top out
     // of a short view, the end of the list in view but not the editor
     // (#1257). It is brought into view as it grows (_ensureEditorVisible);
-    // closed, it follows again.
-    _followedBeforeEdit = _scrollController.anchored;
+    // closed, it follows again. A click opened it: the press stopped the list
+    // following while held, to follow again as it is let go, after this
+    // (the message hears it first, see _handlePointerUp); it is this that
+    // has it follow again now.
+    _followedBeforeEdit = _scrollController.anchored || _followedBeforePress;
+    _followedBeforePress = false;
     _scrollController.anchored = false;
     setState(() {
       _closingIndex = null;
@@ -2719,9 +2734,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
           .where((box) => _indexOf(box) == index)
           .firstOrNull;
       if (item == null) return null;
-      final top =
-          item.localToGlobal(Offset(0, _gapBefore(index))).dy -
-          layer.localToGlobal(Offset.zero).dy;
+      final top = _topIn(layer, item, _gapBefore(index));
       return _sticks ? math.max(top, inset) : top;
     }
     // Not findRenderObject: painted in the frame whose layout dropped the
@@ -2731,9 +2744,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
         (_editorPlaceholderKey.currentContext as Element?)?.renderObject
             as RenderBox?;
     if (placeholder != null && placeholder.attached && placeholder.hasSize) {
-      final top =
-          placeholder.localToGlobal(Offset.zero).dy -
-          layer.localToGlobal(Offset.zero).dy;
+      final top = _topIn(layer, placeholder, 0);
       return _sticks ? math.max(top, inset) : top;
     }
     final first = _laidOutItems().firstOrNull;
@@ -2743,6 +2754,12 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     }
     return null;
   }
+
+  /// How far [y] in [box] is below the top of [layer], in [layer]'s units:
+  /// not the difference of their places on screen, which the window's zoom
+  /// scales (see [UiZoom]) while [layer] paints in units of its own.
+  static double _topIn(RenderBox layer, RenderBox box, double y) =>
+      MatrixUtils.transformPoint(box.getTransformTo(layer), Offset(0, y)).dy;
 
   // --- The sticky user message ---------------------------------------------
 

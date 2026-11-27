@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:bao_remote/claude.dart' show ClaudeHistoryPage;
+import 'package:bao_remote/client.dart' show SshCore;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../channel/channel_setup.dart';
 import '../../chat/chat_models.dart';
 import '../../chat/composer/paste_store.dart';
 import '../../chat/composer/remote_agy_setup.dart';
@@ -17,6 +19,7 @@ import '../../models/model_provider.dart';
 import '../../models/model_providers.dart';
 import '../../models/model_runtime.dart';
 import '../../remote/port_forwards.dart';
+import '../../remote/remote_claude.dart' show remoteCoreOf;
 import '../../remote/remote_location.dart';
 import '../../settings/user_settings.dart';
 import '../../usage/agy_usage_meter.dart';
@@ -24,7 +27,6 @@ import '../../usage/claude_usage_meter.dart';
 import '../../usage/usage_ledger.dart';
 import '../../workspace/editor_launcher.dart' show openExternal;
 import '../agent_kernel.dart';
-import '../antigravity/agy_quota.dart';
 import '../antigravity/agy_remote_runtime.dart';
 import '../antigravity/agy_runtime.dart';
 import '../commit_attribution.dart';
@@ -416,17 +418,17 @@ class ClaudeCodeKernel
   /// The model asked for, as the CLI names it (e.g. `opus[1m]`), or a
   /// provider's ([modelRef]). BaoCode's own core has no model of its own:
   /// on it, one of no upstream is the first upstream's model. A provider's
-  /// removed since falls back as the picker shows it: to Claude Code's own
-  /// if offered there, else to the first upstream's.
+  /// removed since (or not offered here, such as Antigravity ACP over SSH)
+  /// falls back as the picker shows it: to Claude Code's own if offered
+  /// there, else to the first offered upstream's.
   String? get _model {
     final picked = _pickedModel;
     if (_resolveModel(picked) != null) return picked;
-    if (_providers.builtinAvailable &&
-        (parseModelRef(picked) == null || _providers.builtinOffered)) {
+    if (_builtinAvailable &&
+        (parseModelRef(picked) == null || _builtinOffered)) {
       return picked;
     }
-    return _providers.firstModel ??
-        (_providers.builtinAvailable ? picked : null);
+    return _firstModel ?? (_builtinAvailable ? picked : null);
   }
 
   set _model(String? model) => _pickedModel = model;
@@ -1235,8 +1237,6 @@ class ClaudeCodeKernel
       }
     }
     _permissions.clear();
-    // What the turn spent of Antigravity's limits.
-    if (_localAgy) unawaited(_agyQuota.refresh());
     // Stopped too: its work folds all the same (the session file tells it
     // was stopped).
     if (worked != null) {
@@ -2634,11 +2634,7 @@ class ClaudeCodeKernel
   }
 
   @override
-  List<RateLimitWindow> get accountLimits => _localAgy
-      ? AgyQuota.current.windows
-      : _onAgy
-      ? const []
-      : _limits;
+  List<RateLimitWindow> get accountLimits => _onAgy ? const [] : _limits;
 
   // The account's usage, asked for (as `/usage` does): no more than once in
   // [_usageFresh], and one request at a time for all sessions.
@@ -2666,10 +2662,10 @@ class ClaudeCodeKernel
 
   @override
   Future<void> refreshUsage() {
-    // Antigravity's account, on its model: its own limits.
-    if (_localAgy) return _agyQuota.refresh();
+    // Antigravity ACP has no official quota API.
     if (_onAgy) {
       if (_remoteAgyHost case final host?) return _loadRemoteAgy(host);
+      _reportStats();
       return Future.value();
     }
     if (_usageFetchedAt case final at?
@@ -2777,20 +2773,13 @@ class ClaudeCodeKernel
     return true;
   }
 
-  /// Antigravity's limits, told to every session as they are read.
-  static final AgyQuota _agyQuota = AgyQuota.current..addListener(_reportAll);
-
   void _reportStats() => emit(
     StatsReported(
       nextSeq,
       UsageStats(
         costUsd: _cost,
-        limits: accountLimits,
-        limitsState: _localAgy
-            ? _agyQuota.state
-            : _onAgy
-            ? LimitsState.unavailable
-            : _limitsState,
+        limits: _onAgy ? const [] : _limits,
+        limitsState: _onAgy ? LimitsState.idle : _limitsState,
         limitsOffBy: _onAgy ? null : _limitsOffBy,
         cache: switch (_requests[_lastRequest]) {
           final last? when _cachingModels.contains(_lastModel) => PromptCache(
@@ -3380,6 +3369,35 @@ class ClaudeCodeKernel
 
   // --- Providers --------------------------------------------------------------------
 
+  /// Whether Claude Code as set up where this session runs (its login,
+  /// models and settings) is available: on this machine, only on the CLI
+  /// core; on an SSH host, whenever its core is not forced to BaoCode's own
+  /// core (Automatic tries the host's CLI first).
+  bool get _builtinAvailable {
+    if (ChannelSetup.channelBuild) return false;
+    if (RemoteLocation.hostOf(_cwd) case final host?) {
+      return remoteCoreOf(host) != SshCore.builtin;
+    }
+    return _providers.builtinAvailable;
+  }
+
+  /// Whether Claude Code as set up where this session runs is in the picker.
+  bool get _builtinOffered => _builtinAvailable && !_providers.builtinHidden;
+
+  /// The first upstream model offered in this session; null without one.
+  String? get _firstModel {
+    for (final provider in _providers.enabled) {
+      if (provider.protocol == ProviderProtocol.agy && !_localAgyOffered) {
+        continue;
+      }
+      for (final info in provider.enabledModels) {
+        final ref = modelRef(provider.id, info.id);
+        if (_resolveModel(ref) != null) return ref;
+      }
+    }
+    return null;
+  }
+
   /// The provider and model of the user's [_model] picks, if it is one.
   (ModelProvider, ProviderModel)? get _custom => _resolveModel(_model);
 
@@ -3394,7 +3412,7 @@ class ClaudeCodeKernel
   bool get _agyOffered =>
       _workspace?.tools == null && !(_workspace?.approvesAll ?? false);
 
-  bool get _localAgy => _onAgy && !RemoteLocation.isRemote(_cwd);
+  bool get _localAgyOffered => _agyOffered && !RemoteLocation.isRemote(_cwd);
 
   String? get _remoteAgyHost =>
       !kIsWeb && RemoteLocation.pathOf(_cwd).startsWith('/')
@@ -3482,8 +3500,9 @@ class ClaudeCodeKernel
     }
     final resolved = _providers.resolve(model);
     if (resolved != null &&
-        resolved.$1.protocolOf(resolved.$2) == ProviderProtocol.agy &&
-        (!_agyOffered || RemoteLocation.isRemote(_cwd))) {
+        !_localAgyOffered &&
+        (resolved.$1.protocol == ProviderProtocol.agy ||
+            resolved.$1.protocolOf(resolved.$2) == ProviderProtocol.agy)) {
       return null;
     }
     return resolved;
@@ -3721,15 +3740,14 @@ class ClaudeCodeKernel
     options: () {
       final providers = [
         for (final provider in _providers.enabled)
-          if (provider.protocol != ProviderProtocol.agy ||
-              (_agyOffered && !RemoteLocation.isRemote(_cwd)))
+          if (provider.protocol != ProviderProtocol.agy || _localAgyOffered)
             provider,
         if (_remoteAgyHost != null && _agyOffered) _remoteAgyProvider,
       ];
       return [
         // Shown unless turned off in Settings → Models; never on BaoCode's
         // own core, which runs on the upstreams alone.
-        if (_providers.builtinOffered)
+        if (_builtinOffered)
           if (_models.isEmpty)
             // Its models not known (it is not logged in, or no session has
             // started on it yet): picking this starts one, which lists them.
@@ -3758,45 +3776,50 @@ class ClaudeCodeKernel
               ),
         for (final provider in providers)
           for (final info in provider.enabledModels)
-            KernelOption(
-              modelRef(provider.id, info.id),
-              provider.labelOf(info),
-              Icons.hub_outlined,
-              [
-                info.id,
-                if (info.contextWindow case final tokens?) formatTokens(tokens),
-              ].join(' · '),
-              group: KernelOptionGroup(
-                provider.id,
-                provider.name,
-                warning: provider.id == _remoteAgyId
-                    ? _remoteAgyWarning
-                    : _providers.error(provider.id),
-                actionLabel:
-                    provider.id == _remoteAgyId && _remoteAgyInstall != null
-                    ? (context) => _remoteAgyInstall!
-                          ? (remoteAgyChinese(context) ? '安装' : 'Install')
-                          : (remoteAgyChinese(context) ? '登录' : 'Sign in')
-                    : null,
-                action: provider.id == _remoteAgyId && _remoteAgyInstall != null
-                    ? (context) {
-                        final host = _remoteAgyHost;
-                        final install = _remoteAgyInstall;
-                        if (host != null && install != null) {
-                          unawaited(_setupRemoteAgy(context, host, install));
+            if (provider.id == _remoteAgyId ||
+                provider.protocolOf(info) != ProviderProtocol.agy ||
+                _localAgyOffered)
+              KernelOption(
+                modelRef(provider.id, info.id),
+                provider.labelOf(info),
+                Icons.hub_outlined,
+                [
+                  info.id,
+                  if (info.contextWindow case final tokens?)
+                    formatTokens(tokens),
+                ].join(' · '),
+                group: KernelOptionGroup(
+                  provider.id,
+                  provider.name,
+                  warning: provider.id == _remoteAgyId
+                      ? _remoteAgyWarning
+                      : _providers.error(provider.id),
+                  actionLabel:
+                      provider.id == _remoteAgyId && _remoteAgyInstall != null
+                      ? (context) => _remoteAgyInstall!
+                            ? (remoteAgyChinese(context) ? '安装' : 'Install')
+                            : (remoteAgyChinese(context) ? '登录' : 'Sign in')
+                      : null,
+                  action:
+                      provider.id == _remoteAgyId && _remoteAgyInstall != null
+                      ? (context) {
+                          final host = _remoteAgyHost;
+                          final install = _remoteAgyInstall;
+                          if (host != null && install != null) {
+                            unawaited(_setupRemoteAgy(context, host, install));
+                          }
                         }
-                      }
-                    : null,
-                iconBuilder: _providerIcon(provider.id),
+                      : null,
+                  iconBuilder: _providerIcon(provider.id),
+                ),
+                iconBuilder: _modelIcon(provider.id, info.id),
               ),
-              iconBuilder: _modelIcon(provider.id, info.id),
-            ),
       ];
     },
     selected: () {
       if (_custom != null) return _model;
       // BaoCode's own core with no upstream: none to run on.
-      if (!_providers.builtinAvailable) return null;
+      if (!_builtinAvailable) return null;
       return switch (_currentModel?.value) {
         final value? => _baseOf(value),
         null => _models.isEmpty ? 'default' : null,

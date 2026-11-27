@@ -1792,6 +1792,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get agentImageUntitled => '图片';
 
   @override
+  String get welcomeDemoTitle => '演示：对比并重写一个限流中间件';
+
+  @override
+  String get welcomeDemoNoModel => '这是演示。要开始真正的对话，请先配置你自己的模型。';
+
+  @override
   String get chatTitleSummarize => '总结新标题';
 
   @override
@@ -1922,27 +1928,6 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get sidebarDeleteAgentTitle => '删除智能体？';
-
-  @override
-  String sidebarDeleteAgentMessage(String title) {
-    return '“$title”及其对话将被移除。';
-  }
-
-  @override
-  String get sidebarDeleteAgentsTitle => '删除智能体？';
-
-  @override
-  String sidebarDeleteAgentsMessage(int count) {
-    return '$count 个智能体及其对话将被删除，内核中的记录也会一并删除。此操作无法撤销。';
-  }
-
-  @override
-  String sidebarDeleteAgentMessageKernel(String title, String kernel) {
-    return '“$title”及其对话将被删除，$kernel 中的记录也会一并删除。此操作无法撤销。';
-  }
-
-  @override
   String get sidebarSearchAgents => '搜索智能体…';
 
   @override
@@ -2013,7 +1998,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String sidebarDeleteCount(int count) {
-    return '删除 $count 个智能体…';
+    return '删除 $count 个智能体';
   }
 
   @override
@@ -2029,11 +2014,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get sidebarDetachAside => '从主对话分离';
-
-  @override
-  String sidebarDeleteAsidesToo(int count) {
-    return '它的 $count 个 /btw 子对话也会一并删除。';
-  }
 
   @override
   String get btwCommandDetail => '在旁边另开一个对话提问';
@@ -2078,18 +2058,30 @@ class AppLocalizationsZh extends AppLocalizations {
   String get sidebarUnarchiveAll => '全部取消归档';
 
   @override
-  String get sidebarDeleteArchived => '删除全部已归档…';
-
-  @override
-  String get sidebarDeleteArchivedTitle => '删除已归档的智能体？';
-
-  @override
-  String sidebarDeleteArchivedMessage(int count) {
-    return '$count 个已归档的智能体及其对话将被删除，内核中的记录也会一并删除。此操作无法撤销。';
-  }
+  String get sidebarDeleteArchived => '删除全部已归档';
 
   @override
   String get sidebarRemoveFromList => '从列表移除';
+
+  @override
+  String sidebarAgentDeleted(String title) {
+    return '已删除「$title」';
+  }
+
+  @override
+  String sidebarAgentsDeleted(int count) {
+    return '已删除 $count 个智能体';
+  }
+
+  @override
+  String sidebarProjectRemoved(String name) {
+    return '已从列表移除「$name」';
+  }
+
+  @override
+  String sidebarWorkspaceDeleted(String name) {
+    return '已删除工作区「$name」';
+  }
 
   @override
   String get sidebarDropToPin => '拖到这里置顶';
@@ -6284,6 +6276,9 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String get modelsDragToReorder => '拖动排序';
+
+  @override
   String get modelsFeaturedWhy => '为什么我看到这个？';
 
   @override
@@ -10233,6 +10228,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get cmdModelWelcome => '设置模型...';
 
   @override
+  String get cmdWelcomeDemo => '查看演示对话';
+
+  @override
   String get modelWelcomeTitle => '选一个模型开始';
 
   @override
@@ -10298,7 +10296,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsSshKeywords =>
-      'ssh 远程 服务器 主机 跳板机 私钥 密码 内核 remote server host';
+      'ssh 远程 服务器 主机 跳板机 私钥 密码 内核 技能 skills remote server host';
 
   @override
   String get sshSettingsDescription => '远程项目连接的服务器：地址、登录方式、跳板机，以及每台用的内核。';
@@ -13428,6 +13426,16 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get remoteLocalAccessAskAgain => '改回每次询问';
+
+  @override
+  String get remoteShareUserSkillsGroup => '技能';
+
+  @override
+  String get remoteShareUserSkills => '共享本机用户级 Skills';
+
+  @override
+  String get remoteShareUserSkillsDetail =>
+      '将本机的用户级 skills（~/.claude/skills）映射到远端临时目录供 SSH 内核使用，不改动远端原有配置。若远端已有同名 skill，优先保留远端版本。';
 
   @override
   String get sidePanelPorts => '端口';

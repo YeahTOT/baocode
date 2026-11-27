@@ -19,3 +19,12 @@ authorization link only when requested. Paste Google's temporary code
 into the BaoCode dialog; the durable CLI credentials remain on that host.
 The app verifies sign-in by refreshing the host's model list. Local
 Antigravity settings and unrelated hosts are not changed.
+
+## Local Claude skills on remote hosts
+
+Current upstream BaoCode enables **Share Local User Skills** by default in
+**Settings → SSH**. This applies to remote Claude Code and BaoCode's
+built-in core, not remote Antigravity. It can copy eligible local skill
+folders and companion files (including resolvable linked files) to a
+temporary directory on the host. Disable this switch before connecting
+to a host that should not receive those files.
