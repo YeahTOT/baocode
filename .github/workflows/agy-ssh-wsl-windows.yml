@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 env:
-  UPSTREAM_SHA: 5393d6878626c004b1b65c462b47831f31c4793f
+  UPSTREAM_SHA: 99d62f318bcb0de45f64c5f7782cbd2ea06b019b
   REMOTE_RELEASE: 2.0.9.42-9ecdc07f5063
   FLUTTER_VERSION: 3.47.5
 jobs:

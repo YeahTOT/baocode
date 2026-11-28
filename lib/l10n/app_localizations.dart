@@ -9909,6 +9909,36 @@ abstract class AppLocalizations {
   /// **'e.g. .git, node_modules, *.log'**
   String get explorerExcludeSettingPlaceholder;
 
+  /// No description provided for @gitAutoFetchSetting.
+  ///
+  /// In en, this message translates to:
+  /// **'Git auto-fetch'**
+  String get gitAutoFetchSetting;
+
+  /// No description provided for @gitAutoFetchSettingDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Periodically fetch the current branch\'s remote in the background so incoming commits appear without a manual Fetch. (git.autofetchInterval)'**
+  String get gitAutoFetchSettingDescription;
+
+  /// No description provided for @gitAutoFetchOff.
+  ///
+  /// In en, this message translates to:
+  /// **'Off'**
+  String get gitAutoFetchOff;
+
+  /// No description provided for @gitAutoFetchMinutes.
+  ///
+  /// In en, this message translates to:
+  /// **'{minutes, plural, =1{Every 1 minute} other{Every {minutes} minutes}}'**
+  String gitAutoFetchMinutes(int minutes);
+
+  /// No description provided for @gitAutoFetchSeconds.
+  ///
+  /// In en, this message translates to:
+  /// **'Every {seconds} seconds'**
+  String gitAutoFetchSeconds(int seconds);
+
   /// No description provided for @claudePathSetting.
   ///
   /// In en, this message translates to:
@@ -23670,6 +23700,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'“{name}” already exists. Replace it?'**
   String remoteBrowserReplace(String name);
+
+  /// Tooltip for the eye icon button that starts Notepad++-style tailing on the active file.
+  ///
+  /// In en, this message translates to:
+  /// **'Tail File (Follow Changes)'**
+  String get tailStart;
+
+  /// Tooltip for the eye icon button when tailing is active.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop Tailing'**
+  String get tailStop;
+
+  /// Tooltip for the disabled tail button when the file has unsaved changes.
+  ///
+  /// In en, this message translates to:
+  /// **'Save changes to start tailing'**
+  String get tailSaveFirst;
+
+  /// Tooltip for the floating button shown when tailing is paused by scrolling up.
+  ///
+  /// In en, this message translates to:
+  /// **'Scroll to Bottom & Resume Tail'**
+  String get tailResume;
+
+  /// Command palette title for toggling tail mode on the active file.
+  ///
+  /// In en, this message translates to:
+  /// **'Toggle Tail (Follow File)'**
+  String get cmdToggleTail;
+
+  /// Inline tooltip shown at the caret when trying to edit a file while tail mode is active.
+  ///
+  /// In en, this message translates to:
+  /// **'Read-only while tailing (tail -f). Stop tailing to edit.'**
+  String get tailReadOnlyHint;
 }
 
 class _AppLocalizationsDelegate
